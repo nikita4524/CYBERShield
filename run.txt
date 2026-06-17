@@ -1,0 +1,15 @@
+aLu8-vXrun8LPNc test@test.com
+
+
+cd apps/api-gateway
+
+# Ya
+venv\Scripts\activate      
+
+uvicorn main:app --reload
+ 
+
+cd apps/web
+npm run dev  
+
+postg : admin

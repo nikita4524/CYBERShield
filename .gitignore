@@ -1,0 +1,76 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+.env
+*.log
+
+# ===== Node.js =====
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# ── Environment ──
+.env
+.env.local
+.env.production
+!.env.example
+
+# ── Database ──
+*.db
+*.sqlite3
+
+# ── Uploads ──
+/uploads/
+/tmp/
+
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Docker ──
+docker-compose.override.yml
+
+# ── Testing ──
+test-results/
+playwright-report/
+.pytest_cache/
+htmlcov/
+coverage/
+
+# ── OS ──
+.DS_Store
+*.swp
+Thumbs.db
+
+# ===== Uploads & Temp =====
+uploads/
+tmp/
+*.tmp
+crash.log
+tmp_*.py
+tmp_*.log
+
+# ===== Uploads & Temp =====
+uploads/
+tmp/
+*.tmp
+crash.log
+tmp_*.py
+tmp_*.log
+
