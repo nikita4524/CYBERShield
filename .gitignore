@@ -74,3 +74,23 @@ crash.log
 tmp_*.py
 tmp_*.log
 
+# ── ML Model Binaries (large files — don't push to GitHub) ──
+*.pkl
+*.h5
+*.pt
+*.pth
+
+# ── Nested venv inside api-gateway ──
+apps/api-gateway/venv/
+
+# ── Local DB files ──
+apps/api-gateway/cybershield.db
+apps/api-gateway/test.db
+
+# ── Env text files with secrets ──
+*.env.txt
+apps/api-gateway/.env
+apps/api-gateway/.env.txt
+
+# ── Large data files ──
+apps/api-gateway/data/url_dataset.csv

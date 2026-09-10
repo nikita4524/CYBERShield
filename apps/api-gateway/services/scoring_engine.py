@@ -126,15 +126,31 @@ class ScoringEngine:
         factors: List[Dict] = []
         model_confidences: List[float] = []
 
+        # URL/QR analysis has no trained model behind it — ai_probability
+        # there is just a copy of the rule score. Running that through the
+        # AI-calibration curve (tuned for genuine model probabilities)
+        # needlessly dampens/stretches an already-conservative heuristic
+        # score, so those analysis types use the rule score directly.
+        is_heuristic_only = inp.analysis_type in ("url", "qr")
+
         for key, res in modalities.items():
             ai_raw = res.ai_probability
             rl = res.rule_score
             model_confidences.append(res.confidence)
 
-            # Apply calibrated band mapping before blending
-            calibrated_ai = self._calibrate_score(ai_raw, key)
+            if is_heuristic_only:
+                calibrated_ai = ai_raw
+                b = rl
+                description = f"{key.title()} heuristic engine: {ai_raw:.2%} (rule-based, no ML calibration)"
+            else:
+                # Apply calibrated band mapping before blending
+                calibrated_ai = self._calibrate_score(ai_raw, key)
+                b = self.ai_weight * calibrated_ai + self.rule_weight * rl
+                description = (
+                    f"{key.title()} AI model: raw={ai_raw:.2%}, "
+                    f"calibrated={calibrated_ai:.2%}"
+                )
 
-            b = self.ai_weight * calibrated_ai + self.rule_weight * rl
             blended[key] = b
             raw_ai[key] = ai_raw
             raw_rule[key] = rl
@@ -146,10 +162,7 @@ class ScoringEngine:
                     "raw_score": round(ai_raw, 4),
                     "calibrated_score": round(calibrated_ai, 4),
                     "contribution": round(self.ai_weight * calibrated_ai * 100, 2),
-                    "description": (
-                        f"{key.title()} AI model: raw={ai_raw:.2%}, "
-                        f"calibrated={calibrated_ai:.2%}"
-                    ),
+                    "description": description,
                 }
             )
             factors.append(
@@ -388,8 +401,9 @@ class ScoringEngine:
             "image": "image",
         }.get(analysis_type, "content")
 
-        # For email/URL/QR: don't mention "AI" since it's heuristic-only
-        is_heuristic_only = analysis_type in ("email", "url", "qr")
+        # For URL/QR: don't mention "AI" since those are heuristic-only.
+        # Email now blends a real TF-IDF+ensemble classifier, so it's excluded.
+        is_heuristic_only = analysis_type in ("url", "qr")
 
         confidence_suffix = (
             "" if confidence_level == "high"

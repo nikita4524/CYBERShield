@@ -1,7 +1,8 @@
 """
 Email phishing analysis service.
-Pure heuristic / rule-based — NO ML model required.
-Combines text analysis, URL heuristics, and sender analysis.
+Hybrid: rule-based heuristics (text, URL, sender) blended with a
+TF-IDF + ensemble ML classifier (see ml/phish_model.py) by ScoringEngine.
+Gracefully degrades to heuristics-only if the trained model is unavailable.
 """
 
 import time
@@ -9,6 +10,7 @@ import logging
 from typing import List, Dict, Optional
 from dataclasses import dataclass, field
 
+from ml.model_loader import ModelLoader
 from utils.text_preprocessing import (
     clean_text,
     extract_urgency_phrases,
@@ -24,18 +26,23 @@ logger = logging.getLogger(__name__)
 class EmailAnalysisResult:
     """Result from email phishing analysis."""
 
-    probability: float = 0.0
+    probability: float = 0.0       # heuristic / rule-based risk score
+    ai_probability: float = 0.0    # ML classifier's P(phishing)
     confidence: float = 0.0
     flags: List[str] = field(default_factory=list)
     features: Dict = field(default_factory=dict)
     highlighted_phrases: List[Dict] = field(default_factory=list)
     flagged_urls: List[Dict] = field(default_factory=list)
     sender_analysis: Dict = field(default_factory=dict)
+    model_available: bool = False
     processing_time_ms: int = 0
 
 
 class EmailAnalyzer:
-    """Analyzes emails for phishing indicators using rules only."""
+    """Analyzes emails for phishing indicators using rules + an ML classifier."""
+
+    def __init__(self):
+        self._loader = ModelLoader()
 
     def analyze(
         self,
@@ -67,10 +74,10 @@ class EmailAnalyzer:
         max_url_risk = 0.0
 
         try:
-            from ml.url_heuristics import analyze_url
+            from ml.url_heuristics import url_heuristics
 
             for url in all_urls:
-                url_result = analyze_url(url)
+                url_result = url_heuristics.analyze(url)
                 url_results.append({"url": url, **url_result})
                 max_url_risk = max(
                     max_url_risk, url_result.get("probability", 0.0)
@@ -169,10 +176,27 @@ class EmailAnalyzer:
         # Confidence: heuristics-only → 0.6 base, higher with more signals
         confidence = min(0.9, 0.5 + (len(flags) * 0.05))
 
-        processing_time_ms = int((time.time() - start_time) * 1000)
+        # ── Step 6: ML classifier (TF-IDF + ensemble) ──
+        # Falls back to the heuristic score itself if the model isn't
+        # available, so the blended score degrades gracefully.
+        ai_probability = combined_prob
+        model_available = False
+        try:
+            vectorizer, classifier = self._loader.get_phishing_model()
+            if vectorizer is not None and classifier is not None:
+                combined_text = build_combined_text(subject, body, sender, all_urls)
+                feature_vec = vectorizer.transform([combined_text])
+                proba = classifier.predict_proba(feature_vec)[0]
+                ai_probability = float(proba[1]) if len(proba) > 1 else float(proba[0])
+                model_available = True
+        except Exception:
+            logger.exception("Phishing model inference failed — using heuristic score")
+
+        processing_time_ms = max(1, round((time.time() - start_time) * 1000))
 
         return EmailAnalysisResult(
             probability=combined_prob,
+            ai_probability=ai_probability,
             confidence=confidence,
             flags=flags,
             features={
@@ -183,11 +207,12 @@ class EmailAnalyzer:
                 "url_count": len(all_urls),
                 "strong_signals": strong_signals,
                 "subject_word_count": len(subject.split()),
-                "model_loaded": False,  # pure heuristic
+                "model_loaded": model_available,
             },
             highlighted_phrases=highlighted_phrases,
             flagged_urls=flagged_urls,
             sender_analysis=sender_analysis,
+            model_available=model_available,
             processing_time_ms=processing_time_ms,
         )
 

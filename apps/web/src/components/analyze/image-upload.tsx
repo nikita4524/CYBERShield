@@ -20,6 +20,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
+import { PreventionBanner } from "@/components/analyze/prevention-banner";
+import type { PreventionAction, PreventionSeverity, PreventionResult } from "@/lib/types";
 
 const ACCEPTED_FORMATS = ["image/png", "image/jpeg", "image/webp", "image/bmp"];
 const ACCEPTED_EXT = ".png,.jpg,.jpeg,.webp,.bmp";
@@ -71,6 +73,10 @@ interface AnalysisResult {
     highlights?: unknown[];
   };
   tip: string;
+  action?: PreventionAction;
+  severity?: PreventionSeverity;
+  reasons?: string[];
+  prevention?: PreventionResult;
 }
 
 export function ImageUpload() {
@@ -355,6 +361,17 @@ export function ImageUpload() {
       {/* ──────────── RESULTS ──────────── */}
       {result && (
         <>
+          <PreventionBanner
+            action={result.action || (result.risk_score >= 81 ? 'FLAG' : result.risk_score >= 61 ? 'WARN' : 'ALLOW')}
+            severity={result.severity || (result.risk_score >= 81 ? 'CRITICAL' : result.risk_score >= 61 ? 'HIGH' : result.risk_score >= 31 ? 'MEDIUM' : 'SAFE')}
+            riskScore={result.risk_score}
+            message={result.prevention?.message}
+            reasons={result.reasons || result.prevention?.reasons || []}
+            incidentId={result.prevention?.incident_id}
+            source="image"
+            inputReference={file?.name ? `Image (${file.name})` : 'Image file'}
+          />
+
           {/* Risk Score */}
           <Card className={`${riskConfig[result.risk_label].border} border bg-zinc-950/50`}>
             <CardContent className="py-5 px-5">

@@ -34,6 +34,8 @@ from services.scoring_engine import (
     ScoringInput,
 )
 from services.explainability import ExplainabilityService
+from security.prevention import prevention_engine
+from security.incident_service import incident_service, get_threat_type
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -113,12 +115,12 @@ async def analyze_email(
     )
 
     modality = ModalityResult(
-        ai_probability=phish_result.probability,
+        ai_probability=phish_result.ai_probability,
         rule_score=phish_result.probability,
         confidence=phish_result.confidence,
         features=phish_result.features,
         flags=phish_result.flags,
-        model_available=False,
+        model_available=phish_result.model_available,
     )
 
     score_out = scoring_engine.compute(ScoringInput(
@@ -136,11 +138,39 @@ async def analyze_email(
         score_out.model_scores, phish_result.features,
     )
 
+    prevention = prevention_engine.evaluate(
+        risk_score=score_out.risk_score,
+        analysis_type="email",
+        contributing_factors=score_out.contributing_factors,
+        risk_label=score_out.risk_label,
+    )
+
+    if prevention.should_create_incident:
+        incident_id = incident_service.create_incident(
+            db=db,
+            source="email",
+            threat_type=get_threat_type("email"),
+            risk_score=score_out.risk_score,
+            severity=prevention.severity,
+            action=prevention.action,
+            reasons=prevention.reasons,
+            input_reference=f"Subject: {request.subject}",
+            analysis_id=analysis_id,
+            user_id=current_user.id if current_user else None,
+        )
+        prevention.incident_id = incident_id
+
     return {
         "analysis_id": analysis_id,
         "risk_score": score_out.risk_score,
         "risk_label": score_out.risk_label,
+        "confidence_level": score_out.confidence_level,
+        "calibration_note": score_out.calibration_note,
         "processing_time_ms": processing_ms,
+        "action": prevention.action,
+        "severity": prevention.severity,
+        "reasons": prevention.reasons,
+        "prevention": prevention.to_dict(),
         "explanation": {
             "summary": score_out.explanation_summary,
             **explanation,
@@ -198,11 +228,39 @@ async def analyze_audio(
             score_out.model_scores, audio_result.metadata,
         )
 
+        prevention = prevention_engine.evaluate(
+            risk_score=score_out.risk_score,
+            analysis_type="audio",
+            contributing_factors=score_out.contributing_factors,
+            risk_label=score_out.risk_label,
+        )
+
+        if prevention.should_create_incident:
+            incident_id = incident_service.create_incident(
+                db=db,
+                source="audio",
+                threat_type=get_threat_type("audio"),
+                risk_score=score_out.risk_score,
+                severity=prevention.severity,
+                action=prevention.action,
+                reasons=prevention.reasons,
+                input_reference=file.filename or "audio_upload",
+                analysis_id=analysis_id,
+                user_id=current_user.id if current_user else None,
+            )
+            prevention.incident_id = incident_id
+
         return {
             "analysis_id": analysis_id,
             "risk_score": score_out.risk_score,
             "risk_label": score_out.risk_label,
+            "confidence_level": score_out.confidence_level,
+            "calibration_note": score_out.calibration_note,
             "processing_time_ms": processing_ms,
+            "action": prevention.action,
+            "severity": prevention.severity,
+            "reasons": prevention.reasons,
+            "prevention": prevention.to_dict(),
             "audio_metadata": audio_result.metadata,
             "explanation": {
                 "summary": score_out.explanation_summary,
@@ -264,11 +322,39 @@ async def analyze_video(
             score_out.model_scores, video_result.metadata,
         )
 
+        prevention = prevention_engine.evaluate(
+            risk_score=score_out.risk_score,
+            analysis_type="video",
+            contributing_factors=score_out.contributing_factors,
+            risk_label=score_out.risk_label,
+        )
+
+        if prevention.should_create_incident:
+            incident_id = incident_service.create_incident(
+                db=db,
+                source="video",
+                threat_type=get_threat_type("video"),
+                risk_score=score_out.risk_score,
+                severity=prevention.severity,
+                action=prevention.action,
+                reasons=prevention.reasons,
+                input_reference=file.filename or "video_upload",
+                analysis_id=analysis_id,
+                user_id=current_user.id if current_user else None,
+            )
+            prevention.incident_id = incident_id
+
         return {
             "analysis_id": analysis_id,
             "risk_score": score_out.risk_score,
             "risk_label": score_out.risk_label,
+            "confidence_level": score_out.confidence_level,
+            "calibration_note": score_out.calibration_note,
             "processing_time_ms": processing_ms,
+            "action": prevention.action,
+            "severity": prevention.severity,
+            "reasons": prevention.reasons,
+            "prevention": prevention.to_dict(),
             "video_metadata": video_result.metadata,
             "explanation": {
                 "summary": score_out.explanation_summary,
@@ -330,11 +416,39 @@ async def analyze_image(
             score_out.model_scores, image_result.metadata,
         )
 
+        prevention = prevention_engine.evaluate(
+            risk_score=score_out.risk_score,
+            analysis_type="image",
+            contributing_factors=score_out.contributing_factors,
+            risk_label=score_out.risk_label,
+        )
+
+        if prevention.should_create_incident:
+            incident_id = incident_service.create_incident(
+                db=db,
+                source="image",
+                threat_type=get_threat_type("image"),
+                risk_score=score_out.risk_score,
+                severity=prevention.severity,
+                action=prevention.action,
+                reasons=prevention.reasons,
+                input_reference=file.filename or "image_upload",
+                analysis_id=analysis_id,
+                user_id=current_user.id if current_user else None,
+            )
+            prevention.incident_id = incident_id
+
         return {
             "analysis_id": analysis_id,
             "risk_score": score_out.risk_score,
             "risk_label": score_out.risk_label,
+            "confidence_level": score_out.confidence_level,
+            "calibration_note": score_out.calibration_note,
             "processing_time_ms": processing_ms,
+            "action": prevention.action,
+            "severity": prevention.severity,
+            "reasons": prevention.reasons,
+            "prevention": prevention.to_dict(),
             "image_metadata": image_result.metadata,
             "per_face_scores": image_result.per_face_scores,
             "explanation": {
@@ -371,7 +485,10 @@ async def analyze_url(
         confidence=url_result.confidence,
         features=url_result.features,
         flags=url_result.flags,
-        model_available=True,
+        # Heuristic-only engine, no trained model backing this score — the
+        # scoring engine uses this flag to skip AI-probability calibration,
+        # which would otherwise distort/dampen a raw heuristic score.
+        model_available=False,
     )
 
     score_out = scoring_engine.compute(ScoringInput(
@@ -390,11 +507,41 @@ async def analyze_url(
         score_out.model_scores, url_result.features,
     )
 
+    prevention = prevention_engine.evaluate(
+        risk_score=score_out.risk_score,
+        analysis_type="url",
+        contributing_factors=score_out.contributing_factors,
+        risk_label=score_out.risk_label,
+    )
+
+    if prevention.should_create_incident:
+        incident_id = incident_service.create_incident(
+            db=db,
+            source="url",
+            threat_type=get_threat_type("url"),
+            risk_score=score_out.risk_score,
+            severity=prevention.severity,
+            action=prevention.action,
+            reasons=prevention.reasons,
+            input_reference=request.url,
+            analysis_id=analysis_id,
+            user_id=current_user.id if current_user else None,
+        )
+        prevention.incident_id = incident_id
+
     return {
         "analysis_id": analysis_id,
+        "url": request.url,
+        "prediction": "malicious" if score_out.risk_label == "dangerous" else "suspicious" if score_out.risk_label == "suspicious" else "benign",
         "risk_score": score_out.risk_score,
         "risk_label": score_out.risk_label,
+        "confidence_level": score_out.confidence_level,
+        "calibration_note": score_out.calibration_note,
         "processing_time_ms": processing_ms,
+        "action": prevention.action,
+        "severity": prevention.severity,
+        "reasons": prevention.reasons,
+        "prevention": prevention.to_dict(),
         "explanation": {
             "summary": score_out.explanation_summary,
             **explanation,
@@ -414,9 +561,11 @@ async def analyze_qr(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user_optional),
 ):
-    start = time.time()
-    # ── FIX: import the singleton instance (lowercase), class is QRAnalyzer ──
+    from utils.file_validation import validate_image_file
     from services.qr_analyzer import qr_analyzer
+
+    start = time.time()
+    await validate_image_file(file)
 
     content = await file.read()
     await file.seek(0)
@@ -430,7 +579,9 @@ async def analyze_qr(
             confidence=qr_result.confidence,
             features=qr_result.features,
             flags=qr_result.flags,
-            model_available=True,
+            # Heuristic-only engine (decoded payload run through the same
+            # rule-based checks as URL analysis) — no trained model.
+            model_available=False,
         )
 
         score_out = scoring_engine.compute(ScoringInput(
@@ -449,12 +600,43 @@ async def analyze_qr(
             score_out.model_scores, qr_result.features,
         )
 
+        prevention = prevention_engine.evaluate(
+            risk_score=score_out.risk_score,
+            analysis_type="qr",
+            contributing_factors=score_out.contributing_factors,
+            risk_label=score_out.risk_label,
+        )
+
+        # Reference: decoded URL or raw data
+        ref_data = (qr_result.decoded.get("raw") or file.filename or "qr_upload") if qr_result.decoded else file.filename or "qr_upload"
+
+        if prevention.should_create_incident:
+            incident_id = incident_service.create_incident(
+                db=db,
+                source="qr",
+                threat_type=get_threat_type("qr"),
+                risk_score=score_out.risk_score,
+                severity=prevention.severity,
+                action=prevention.action,
+                reasons=prevention.reasons,
+                input_reference=ref_data,
+                analysis_id=analysis_id,
+                user_id=current_user.id if current_user else None,
+            )
+            prevention.incident_id = incident_id
+
         return {
             "analysis_id": analysis_id,
             "decoded": qr_result.decoded,
             "risk_score": score_out.risk_score,
             "risk_label": score_out.risk_label,
+            "confidence_level": score_out.confidence_level,
+            "calibration_note": score_out.calibration_note,
             "processing_time_ms": processing_ms,
+            "action": prevention.action,
+            "severity": prevention.severity,
+            "reasons": prevention.reasons,
+            "prevention": prevention.to_dict(),
             "explanation": {
                 "summary": score_out.explanation_summary,
                 **explanation,

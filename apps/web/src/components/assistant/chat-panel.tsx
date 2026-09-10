@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2, Lightbulb } from "lucide-react";
 import { ChatMessage } from "./chat-message";
 import { useChat } from "@/hooks/use-chat";
@@ -83,12 +84,28 @@ const PLACEHOLDERS: Record<AssistantMode, string> = {
 
 export function ChatPanel({ mode }: { mode: AssistantMode }) {
   const { messages, sendMessage, isLoading, clearChat, facts } = useChat({ mode });
+  const searchParams = useSearchParams();
   const endRef = useRef<HTMLDivElement>(null);
   const promptRef = useRef<HTMLTextAreaElement>(null);
+  const handledQueryRef = useRef(false);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    if (handledQueryRef.current) return;
+    const threatType = searchParams?.get("threat_type");
+    const riskScore = searchParams?.get("risk_score");
+    const action = searchParams?.get("action");
+    const ref = searchParams?.get("reference");
+
+    if (threatType && riskScore) {
+      handledQueryRef.current = true;
+      const initialQuery = `CyberShield detected a ${threatType.replace(/_/g, ' ')} (${ref || 'N/A'}) with risk score ${riskScore}% and action ${action || 'BLOCK'}. Why was this considered dangerous, what should I do right now, and what should I avoid?`;
+      sendMessage(initialQuery);
+    }
+  }, [searchParams, sendMessage]);
 
   const handleToolSelect = (toolId: string) => {
     const prompt = TOOL_PROMPTS[toolId];

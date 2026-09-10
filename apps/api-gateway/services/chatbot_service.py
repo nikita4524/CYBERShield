@@ -12,10 +12,20 @@ from __future__ import annotations
 import json
 import logging
 import random
+from typing import AsyncIterator, Optional
 
-from ml.llm_client import ask_chatbot, generate_quiz_llm
+from config import settings
+from ml.llm_client import ask_chatbot, ask_chatbot_stream, generate_quiz_llm
 
 logger = logging.getLogger(__name__)
+
+DISABLED_MESSAGE = (
+    "🔒 **CyberShield Assistant is currently disabled**\n\n"
+    "The administrator has turned off AI chat for this deployment. Quick tips:\n\n"
+    "1. **Never share OTP** — no bank or UPI app will ever ask for it.\n"
+    "2. **Verify UPI payee** name before confirming QR payments.\n"
+    "3. **Report fraud** at cybercrime.gov.in or call **1930**.\n"
+)
 
 # ─────────────────────────────────────────────────────────────────
 # System prompts
@@ -138,6 +148,11 @@ IOT_KEYWORDS = (
     "smart plug", "wifi camera", "cctv", "connected device", "telemetry",
 )
 
+NEWS_KEYWORDS = (
+    "news", "latest", "recent", "breaking", "headline",
+    "current threat", "trending", "this week", "today's",
+)
+
 # ─────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────
@@ -175,23 +190,59 @@ def _message_mentions_iot(messages: list[dict]) -> bool:
     return any(keyword in text for keyword in IOT_KEYWORDS)
 
 
+def _message_mentions_news(messages: list[dict]) -> bool:
+    text = " ".join(m.get("content", "") for m in messages).lower()
+    return any(keyword in text for keyword in NEWS_KEYWORDS)
+
+
+async def build_news_context(limit: int = 5) -> str:
+    """Fetch recent India-relevant cyber news headlines to ground the assistant's reply."""
+    try:
+        from services.news_service import fetch_news
+
+        articles = await fetch_news(limit=limit, india_only=True)
+        if not articles:
+            return ""
+
+        lines = ["\nRECENT INDIA CYBER NEWS (reference these real, current headlines when relevant):"]
+        for a in articles:
+            lines.append(f"- {a['title']} — {a['source']}: {a['summary'][:150]}")
+        return "\n".join(lines)
+    except Exception:
+        logger.exception("Failed to build news chat context")
+        return ""
+
+
+async def _resolve_context(messages: list[dict], mode: str, extra_context: str) -> str:
+    """Append news context on top of any caller-supplied extra_context (e.g. IoT snapshot)."""
+    if mode == "india_news":
+        extra_context += await build_news_context(limit=5)
+    elif mode == "general" and _message_mentions_news(messages):
+        extra_context += await build_news_context(limit=3)
+    return extra_context
+
+
 async def chat_response(
     messages: list[dict],
     mode: str = "general",
     extra_context: str = "",
+    db=None,
 ) -> dict:
     """
     Generate an assistant reply.
 
     Returns {"reply": str, "facts": list[str]}
     """
+    if not settings.CHATBOT_ENABLED:
+        facts = random.sample(INDIA_FACTS, min(2, len(INDIA_FACTS)))
+        return {"reply": DISABLED_MESSAGE, "facts": facts}
+
     # ✅ FIX: handle quiz_gen mode by generating quiz and formatting as chat
     if mode == "quiz_gen":
-        return await _handle_quiz_mode(messages)
+        return await _handle_quiz_mode(messages, db=db)
 
     system = SYSTEM_GENERAL if mode == "general" else SYSTEM_NEWS
-    if extra_context:
-        system = system + extra_context
+    system = system + await _resolve_context(messages, mode, extra_context)
 
     reply = await ask_chatbot(
         messages=messages,
@@ -207,7 +258,48 @@ async def chat_response(
     return {"reply": reply, "facts": facts}
 
 
-async def _handle_quiz_mode(messages: list[dict]) -> dict:
+async def chat_response_stream(
+    messages: list[dict],
+    mode: str = "general",
+    extra_context: str = "",
+    db=None,
+) -> AsyncIterator[dict]:
+    """
+    Stream an assistant reply as it's generated.
+
+    Yields {"type": "delta", "content": str} chunks, then one
+    {"type": "facts", "facts": list[str]} chunk at the end.
+    """
+    if not settings.CHATBOT_ENABLED:
+        yield {"type": "delta", "content": DISABLED_MESSAGE}
+        yield {"type": "facts", "facts": random.sample(INDIA_FACTS, min(2, len(INDIA_FACTS)))}
+        return
+
+    if mode == "quiz_gen":
+        result = await _handle_quiz_mode(messages, db=db)
+        yield {"type": "delta", "content": result["reply"]}
+        yield {"type": "facts", "facts": result["facts"]}
+        return
+
+    system = SYSTEM_GENERAL if mode == "general" else SYSTEM_NEWS
+    system = system + await _resolve_context(messages, mode, extra_context)
+
+    async for piece in ask_chatbot_stream(
+        messages=messages,
+        system_prompt=system,
+        temperature=0.7,
+        max_tokens=4096,
+    ):
+        yield {"type": "delta", "content": piece}
+
+    if _message_mentions_iot(messages):
+        facts = random.sample(IOT_TIPS, min(2, len(IOT_TIPS)))
+    else:
+        facts = random.sample(INDIA_FACTS, min(2, len(INDIA_FACTS)))
+    yield {"type": "facts", "facts": facts}
+
+
+async def _handle_quiz_mode(messages: list[dict], db=None) -> dict:
     """
     When user is in quiz_gen mode, extract their topic from the last message,
     generate quiz questions, and format them as a readable chat response.
@@ -219,6 +311,7 @@ async def _handle_quiz_mode(messages: list[dict]) -> dict:
         num_questions=5,
         difficulty=1,
         category="general",
+        db=db,
     )
 
     # Format questions as readable markdown
@@ -242,12 +335,20 @@ async def generate_quiz(
     num_questions: int = 5,
     difficulty: int = 1,
     category: str = "general",
+    db=None,
 ) -> list[dict]:
     """
     Generate quiz questions via AI.
 
     Returns list of question dicts or fallback questions on failure.
+    When `db` is provided, successfully AI-generated questions are persisted
+    to the quiz bank (via quiz_service) so they can be replayed later and
+    show up in the Awareness module. Fallback (canned) questions are never
+    persisted since they already live in the seed data.
     """
+    if not settings.CHATBOT_ENABLED:
+        return _fallback_quiz(num_questions, difficulty, category)
+
     user_prompt = (
         f"Generate exactly {num_questions} cybersecurity quiz questions.\n"
         f"Topic: {topic}\n"
@@ -288,7 +389,18 @@ async def generate_quiz(
                 "category": q.get("category", category),
             })
 
-        return validated[:num_questions] if validated else _fallback_quiz(num_questions, difficulty, category)
+        if not validated:
+            return _fallback_quiz(num_questions, difficulty, category)
+
+        result = validated[:num_questions]
+        if db is not None:
+            try:
+                from services.quiz_service import quiz_service
+
+                quiz_service.save_ai_generated_questions(db, result)
+            except Exception:
+                logger.exception("Failed to persist AI-generated quiz questions")
+        return result
 
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         logger.warning("Quiz JSON parse failed: %s — raw: %s", exc, raw[:200])
@@ -371,3 +483,89 @@ def _fallback_quiz(count: int, difficulty: int, category: str) -> list[dict]:
         },
     ]
     return bank[:count]
+
+
+async def explain_threat_context(
+    threat_context: dict,
+    user_query: Optional[str] = None,
+) -> dict:
+    """
+    Generate an AI explanation and actionable guidance for a detected threat.
+    Does NOT override the backend prevention decision.
+    """
+    threat_type = threat_context.get("threat_type", "unknown threat")
+    risk_score = threat_context.get("risk_score", 0)
+    action = threat_context.get("action", "WARN")
+    severity = threat_context.get("severity", "MEDIUM")
+    reasons = threat_context.get("reasons", [])
+    input_reference = threat_context.get("input_reference", "")
+
+    # Default fallback structured response
+    recs = [
+        "Do not click on links, download attachments, or scan this code further.",
+        "Verify the sender/caller through official, independent contact channels.",
+        "If you already provided OTP/passwords, change them immediately and freeze accounts.",
+    ]
+    avoids = [
+        "Do NOT reply to suspicious emails or forward links to others.",
+        "Do NOT share OTP, CVV, UPI PIN, or bank passwords with anyone.",
+        "Do NOT trust caller ID or voice alone for financial requests.",
+    ]
+    channels = [
+        "National Cyber Crime Reporting Portal: cybercrime.gov.in",
+        "National Cyber Crime Helpline: 1930 (Available 24x7 across India)",
+        "RBI Banking Ombudsman & NPCI UPI Dispute Support",
+    ]
+
+    prompt = f"""You are the CyberShield AI Security Assistant.
+Explain why the following threat was flagged and give defensive advice to an Indian user:
+
+THREAT CONTEXT:
+- Threat Type: {threat_type}
+- Risk Score: {risk_score}/100
+- Prevention Action: {action}
+- Severity Level: {severity}
+- Detected Reasons: {', '.join(reasons) if reasons else 'Heuristic indicators'}
+- Reference: {input_reference or 'N/A'}
+
+USER QUESTION: {user_query or 'Why was this blocked and what should I do?'}
+
+Please provide:
+1. Clear explanation of why this was identified as {severity} risk / {action}.
+2. Immediate steps the user should take right now.
+3. Things the user must NEVER do.
+4. How to verify if this was claimed to be from a legitimate bank/institution.
+5. Exact steps to take if the user ALREADY shared OTP, PIN, or payment.
+
+Keep your response structured, concise, and focused on defensive cybersecurity guidance with references to 1930 and cybercrime.gov.in."""
+
+    explanation_text = ""
+    try:
+        if settings.CHATBOT_ENABLED and settings.GROQ_API_KEY:
+            messages = [{"role": "user", "content": prompt}]
+            explanation_text = await ask_chatbot(messages, SYSTEM_GENERAL)
+    except Exception as exc:
+        logger.warning("LLM threat explanation failed: %s", exc)
+
+    if not explanation_text:
+        explanation_text = (
+            f"### 🛡️ Threat Analysis ({severity} — Action: {action})\n\n"
+            f"This content was evaluated with a **Risk Score of {risk_score}/100** by CyberShield's multi-modal engine.\n\n"
+            f"**Key Findings:**\n"
+            + "".join(f"- {r}\n" for r in (reasons or ["Elevated threat indicators detected"]))
+            + f"\n**Action Taken:** `{action}` — {action} policy applied deterministically by the Prevention Engine.\n\n"
+            f"**Next Steps:**\n"
+            f"1. **Never share credentials**: No bank or UPI app asks for OTP or PIN.\n"
+            f"2. **Verify independently**: Contact the official institution directly.\n"
+            f"3. **Report fraud**: Call **1930** or visit **cybercrime.gov.in** immediately."
+        )
+
+    return {
+        "explanation": explanation_text,
+        "action": action,
+        "severity": severity,
+        "risk_score": risk_score,
+        "recommended_steps": recs,
+        "things_to_avoid": avoids,
+        "reporting_channels": channels,
+    }

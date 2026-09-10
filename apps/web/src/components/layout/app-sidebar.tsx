@@ -20,6 +20,7 @@ import {
   PanelLeftOpen,
   Settings,
   Shield,
+  ShieldAlert,
   FileText,
   Trophy,
   Video,
@@ -272,6 +273,11 @@ function SidebarContent({
             label: "Dashboard",
             href: "/dashboard",
             icon: LayoutDashboard,
+          })}
+          {renderNavItem({
+            label: "Security Center",
+            href: "/security",
+            icon: ShieldAlert,
           })}
           {isAuthenticated &&
             renderNavItem({

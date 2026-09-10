@@ -120,6 +120,26 @@ export interface Explanation {
   };
 }
 
+export type PreventionAction =
+  | "ALLOW"
+  | "WARN"
+  | "RESTRICT"
+  | "BLOCK"
+  | "QUARANTINE"
+  | "FLAG";
+
+export type PreventionSeverity = "SAFE" | "MEDIUM" | "HIGH" | "CRITICAL";
+
+export interface PreventionResult {
+  action: PreventionAction;
+  severity: PreventionSeverity;
+  risk_score: number;
+  message: string;
+  reasons: string[];
+  should_create_incident?: boolean;
+  incident_id?: string | null;
+}
+
 export interface AnalysisResponse {
   analysis_id: string;
   risk_score: number;
@@ -127,6 +147,14 @@ export interface AnalysisResponse {
   processing_time_ms: number;
   explanation: Explanation;
   tip: string;
+  action?: PreventionAction;
+  severity?: PreventionSeverity;
+  reasons?: string[];
+  prevention?: PreventionResult;
+  prediction?: "benign" | "suspicious" | "malicious";
+  url?: string;
+  confidence_level?: "high" | "medium" | "low";
+  calibration_note?: string;
   audio_metadata?: AudioMetadata;
   video_metadata?: VideoMetadata;
 }
@@ -352,4 +380,65 @@ export interface RegisterIoTDeviceRequest {
   type: IoTDeviceType;
   location: string;
   mac_address?: string;
+}
+
+/* ── Security Incidents ── */
+export type IncidentStatus = "OPEN" | "REVIEWING" | "RESOLVED" | "FALSE_POSITIVE";
+
+export interface SecurityIncident {
+  id: string;
+  incident_number: string;
+  threat_type: string;
+  source: "url" | "email" | "qr" | "audio" | "video" | "image";
+  input_reference?: string | null;
+  risk_score: number;
+  severity: PreventionSeverity;
+  action: PreventionAction;
+  reasons: string[];
+  status: IncidentStatus;
+  resolution_note?: string | null;
+  analysis_id?: string | null;
+  user_id?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
+}
+
+export interface IncidentListResponse {
+  total: number;
+  page: number;
+  limit: number;
+  items: SecurityIncident[];
+}
+
+export interface IncidentStats {
+  total: number;
+  critical: number;
+  high: number;
+  medium: number;
+  blocked: number;
+  quarantined: number;
+  resolved: number;
+  open: number;
+}
+
+export interface ThreatExplanationRequest {
+  threat_context: {
+    threat_type: string;
+    risk_score: number;
+    action: string;
+    severity: string;
+    reasons: string[];
+    input_reference?: string;
+  };
+  user_query?: string;
+}
+
+export interface ThreatExplanationResponse {
+  explanation: string;
+  action: string;
+  severity: string;
+  risk_score: number;
+  recommended_steps: string[];
+  things_to_avoid: string[];
+  reporting_channels: string[];
 }

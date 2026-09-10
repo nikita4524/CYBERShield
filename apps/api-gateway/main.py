@@ -3,8 +3,15 @@ CyberShield AI — FastAPI Application Entry Point
 """
 
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+
+# Ensure UTF-8 output on Windows consoles
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # Suppress noisy ML logs
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -22,7 +29,7 @@ from utils.exceptions import setup_exception_handlers
 from dependencies import rate_limit_dependency
 
 # Import routers (will be created in subsequent steps)
-from routes import auth, analyze, awareness, reports, admin, demo, chatbot, iot
+from routes import auth, analyze, awareness, reports, admin, demo, chatbot, iot, incidents
 
 
 @asynccontextmanager
@@ -166,6 +173,11 @@ def create_application() -> FastAPI:
         iot.router,
         prefix="/api/v1/iot",
         tags=["IoT"],
+    )
+    app.include_router(
+        incidents.router,
+        prefix="/api/v1/incidents",
+        tags=["Incidents"],
     )
     
     # ─── Temporary Quiz Routes (Fix for 404) ───

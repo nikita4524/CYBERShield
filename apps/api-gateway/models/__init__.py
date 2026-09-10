@@ -11,6 +11,7 @@ from models.audit import AuditLog
 from models.auth import OTPToken, RefreshToken
 from models.config import ScoringConfig
 from models.iot import IoTDevice, IoTTelemetry, IoTAlert
+from models.incident import SecurityIncident
 
 __all__ = [
     "User",
@@ -29,4 +30,5 @@ __all__ = [
     "IoTDevice",
     "IoTTelemetry",
     "IoTAlert",
+    "SecurityIncident",
 ]

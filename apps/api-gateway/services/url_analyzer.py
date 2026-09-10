@@ -12,6 +12,11 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, parse_qs, unquote
 
+from utils.text_preprocessing import (
+    INDIAN_BANKS,
+    LEGITIMATE_DOMAINS as FINANCIAL_LEGITIMATE_DOMAINS,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Known-bad / suspicious lists ──────────────────────────────────────
@@ -40,15 +45,29 @@ PHISHING_KEYWORDS = [
     "authenticate", "wallet", "paypal", "apple", "microsoft",
     "amazon", "netflix", "facebook", "instagram", "google",
     "ebay", "chase", "wells", "citi", "hsbc",
+    # India-specific phishing vocabulary — this product's primary threat
+    # surface (UPI / net-banking scams), previously uncovered here.
+    "kyc", "netbanking", "otp", "upi", "aadhaar", "pancard",
 ]
 
+# Words a scammer glues directly onto a bank code with no separator
+# (e.g. "axisbank", "sbisecure") — used only to disambiguate genuine
+# bank-name abuse from incidental substrings like "axis" inside "taxis".
+BANK_ABUSE_SUFFIX_WORDS = [
+    "bank", "secure", "verify", "login", "kyc", "netbanking",
+    "online", "update", "confirm", "alert", "support",
+]
+
+# Global brand/service domains considered legitimate out of the box,
+# merged with the shared Indian-bank/fintech whitelist so the same
+# "legitimate domain" bonus and impersonation guards apply everywhere.
 LEGITIMATE_DOMAINS = {
     "google.com", "youtube.com", "facebook.com", "amazon.com",
     "apple.com", "microsoft.com", "github.com", "stackoverflow.com",
     "wikipedia.org", "twitter.com", "x.com", "linkedin.com",
     "reddit.com", "netflix.com", "paypal.com", "ebay.com",
     "instagram.com", "whatsapp.com", "zoom.us",
-}
+} | FINANCIAL_LEGITIMATE_DOMAINS
 
 
 @dataclass
@@ -95,6 +114,12 @@ class URLAnalyzer:
         query = parsed.query.lower()
         full_url_lower = url.lower()
 
+        # Resolved once up front (endswith-based, so multi-part TLDs like
+        # .co.in / .gov.in match correctly) and used to guard every
+        # false-positive-prone rule below instead of patching flags after
+        # the fact.
+        is_legitimate = self._is_legitimate_domain(hostname)
+
         features["scheme"] = parsed.scheme
         features["hostname"] = hostname
         features["path"] = parsed.path
@@ -106,7 +131,7 @@ class URLAnalyzer:
         # ─────────────────────────────────────────────────────────
         if parsed.scheme == "http":
             score += 0.10
-            flags.append("no_https")
+            flags.append("non_https")
             highlights.append({
                 "type": "scheme",
                 "value": "http",
@@ -231,16 +256,49 @@ class URLAnalyzer:
 
         # ─────────────────────────────────────────────────────────
         # 9. Phishing keywords
+        # A legitimate site's own path (e.g. hdfcbank.com/login) or
+        # domain (google.com contains "google", which is itself in this
+        # list as a brand name to catch impersonation elsewhere) will
+        # trivially match — only meaningful once we know it's *not* a
+        # trusted domain, otherwise this just adds noise that corrupts
+        # the confidence calculation for obviously safe sites.
         # ─────────────────────────────────────────────────────────
         keyword_hits = []
-        for kw in PHISHING_KEYWORDS:
-            if kw in full_url_lower:
-                keyword_hits.append(kw)
+        if not is_legitimate:
+            for kw in PHISHING_KEYWORDS:
+                if kw in full_url_lower:
+                    keyword_hits.append(kw)
         features["phishing_keywords"] = keyword_hits
         if keyword_hits:
             kw_score = min(len(keyword_hits) * 0.05, 0.20)
             score += kw_score
             flags.append(f"phishing_keywords_found ({len(keyword_hits)})")
+
+        # ─────────────────────────────────────────────────────────
+        # 9b. Indian bank name abuse (e.g. "sbi", "hdfc" in a domain
+        #     that isn't the bank's own site) — previously only checked
+        #     by the email pipeline (ml/url_heuristics.py), never here,
+        #     despite this being the product's primary phishing vector.
+        #
+        #     Matching is deliberately not "bank code anywhere in
+        #     hostname": short codes like "axis"/"pnb" collide with
+        #     ordinary words (e.g. "axis" inside "taxis.com"). Instead we
+        #     require either an exact hyphen/dot-delimited token ("sbi"
+        #     in "sbi-kyc-verify.xyz") or the code glued directly to a
+        #     phishing-domain word ("axisbank" in
+        #     "axisbank-netbanking-login.top").
+        # ─────────────────────────────────────────────────────────
+        bank_hit = "" if is_legitimate else self._check_bank_name_abuse(hostname)
+        features["bank_name_abuse"] = bank_hit
+        if bank_hit:
+            score += 0.35
+            flags.append(f"bank_name_abuse:{bank_hit}")
+            highlights.append({
+                "type": "hostname",
+                "value": hostname,
+                "reason": f"Bank name '{bank_hit}' found in a domain that isn't "
+                          f"the bank's official site — likely impersonation",
+            })
 
         # ─────────────────────────────────────────────────────────
         # 10. Punycode / IDN homograph attack
@@ -267,7 +325,7 @@ class URLAnalyzer:
         # ─────────────────────────────────────────────────────────
         # 12. Brand impersonation in subdomain
         # ─────────────────────────────────────────────────────────
-        brand_impersonation = self._check_brand_impersonation(hostname)
+        brand_impersonation = None if is_legitimate else self._check_brand_impersonation(hostname)
         if brand_impersonation:
             score += 0.20
             flags.append(f"possible_brand_impersonation: {brand_impersonation}")
@@ -291,16 +349,10 @@ class URLAnalyzer:
         # ─────────────────────────────────────────────────────────
         # 14. Legitimate domain bonus (reduce false positives)
         # ─────────────────────────────────────────────────────────
-        base_domain = self._get_base_domain(hostname)
-        features["base_domain"] = base_domain
-        if base_domain in LEGITIMATE_DOMAINS:
+        features["base_domain"] = self._get_base_domain(hostname)
+        features["is_known_legitimate"] = is_legitimate
+        if is_legitimate:
             score = max(score - 0.40, 0.0)
-            if "possible_brand_impersonation" in str(flags):
-                # Remove brand impersonation flag for legit domains
-                flags = [f for f in flags if "brand_impersonation" not in f]
-            features["is_known_legitimate"] = True
-        else:
-            features["is_known_legitimate"] = False
 
         # ─────────────────────────────────────────────────────────
         # 15. Query string analysis
@@ -316,12 +368,29 @@ class URLAnalyzer:
                     flags.append(f"redirect_param: {param}")
                     break
 
+        # ─────────────────────────────────────────────────────────
+        # 16. Multi-signal agreement bonus
+        # Several independent weak/moderate signals firing together is
+        # itself strong evidence — a single heuristic score often stays
+        # under the "dangerous" threshold even for obvious phishing URLs
+        # because no individual rule dominates. Reward corroboration
+        # instead of only summing isolated flags.
+        # ─────────────────────────────────────────────────────────
+        signal_count = len(flags)
+        if not is_legitimate and signal_count >= 4:
+            score += 0.10
+            flags.append("multiple_corroborating_signals")
+
         # ── Clamp final score ──
         final_score = round(min(max(score, 0.0), 1.0), 4)
 
-        # Confidence is higher when more signals are detected
-        signal_count = len(flags)
-        confidence = min(0.55 + signal_count * 0.05, 0.95)
+        # Confidence reflects how decisive the evidence is: a clean URL
+        # with zero red flags is just as high-confidence as one with many
+        # — it's the *ambiguous*, sparsely-flagged middle that's uncertain.
+        if signal_count == 0:
+            confidence = 0.90
+        else:
+            confidence = min(0.55 + signal_count * 0.07, 0.97)
 
         processing_time_ms = int((time.time() - start_time) * 1000)
 
@@ -336,6 +405,44 @@ class URLAnalyzer:
         )
 
     # ── Helper methods ────────────────────────────────────────────
+
+    @staticmethod
+    def _is_legitimate_domain(hostname: str) -> bool:
+        """
+        Check hostname against the legitimate-domain whitelist using
+        suffix matching (not just the naive last-two-parts base domain),
+        so multi-part TLDs like ``sbi.co.in`` or ``retail.axisbank.co.in``
+        are recognised correctly.
+        """
+        if not hostname:
+            return False
+        for legit in LEGITIMATE_DOMAINS:
+            if hostname == legit or hostname.endswith("." + legit):
+                return True
+        return False
+
+    @staticmethod
+    def _check_bank_name_abuse(hostname: str) -> str:
+        """
+        Return the abused Indian bank name if one is found either as its
+        own hyphen/dot-delimited token, or glued directly to a known
+        phishing suffix word. Plain "bank code anywhere in the string"
+        matching is avoided because short codes (axis, pnb, rbl) collide
+        with ordinary English substrings.
+        """
+        tokens = re.split(r"[^a-z0-9]+", hostname)
+        hostname_no_tld = hostname.rsplit(".", 1)[0] if "." in hostname else hostname
+        for bank in INDIAN_BANKS:
+            bank_key = bank.replace(" ", "")
+            if bank_key in tokens:
+                return bank
+            if any(
+                f"{bank_key}{suffix}" in hostname_no_tld
+                or f"{suffix}{bank_key}" in hostname_no_tld
+                for suffix in BANK_ABUSE_SUFFIX_WORDS
+            ):
+                return bank
+        return ""
 
     @staticmethod
     def _is_ip_address(hostname: str) -> bool:

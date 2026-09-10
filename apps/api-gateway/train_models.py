@@ -1,11 +1,14 @@
 """
-Train deepfake detection models.
+Train deepfake detection + URL phishing models.
 Usage:
-    python train_models.py                    # Train both
+    python train_models.py                    # Train audio + video
     python train_models.py --audio-only       # Audio only
     python train_models.py --video-only       # Video only
+    python train_models.py --url-only         # URL phishing classifier only
 """
+import csv
 import os
+import random
 import sys
 import argparse
 import numpy as np
@@ -260,6 +263,77 @@ def train_video(data_dir: str = None, epochs: int = 10):
             print(f"  Saved (best={val_acc:.1f}%)")
 
     print(f"Video training done. Best={best_acc:.1f}% → {save_path}")
+    return True
+
+
+def train_url(data_path: str = None, max_per_class: int = 60000, test_size: float = 0.2):
+    """
+    Train the URL phishing/malicious classifier.
+
+    Expects a CSV with `url,label` columns where label is "good"/"bad"
+    (or 0/1). Classes are balanced by downsampling the majority class to
+    `max_per_class`, since the reference dataset is ~82% legitimate.
+    """
+    if data_path is None:
+        data_path = str(SCRIPT_DIR / "data" / "url_dataset.csv")
+
+    data_file = Path(data_path)
+    if not data_file.exists():
+        print(f"ERROR: Dataset not found at {data_path}")
+        print()
+        print("Expected a CSV with columns: url,label (label = good/bad or 0/1)")
+        return False
+
+    good_urls, bad_urls = [], []
+    with open(data_file, "r", encoding="utf-8", errors="ignore") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            url = (row.get("url") or "").strip()
+            label = (row.get("label") or "").strip().lower()
+            if not url:
+                continue
+            if label in ("bad", "1", "phishing", "malicious"):
+                bad_urls.append(url)
+            elif label in ("good", "0", "legitimate", "benign"):
+                good_urls.append(url)
+
+    if not good_urls or not bad_urls:
+        print(f"ERROR: Dataset has no usable rows (good={len(good_urls)}, bad={len(bad_urls)})")
+        return False
+
+    print(f"URL dataset: {len(good_urls)} good, {len(bad_urls)} bad (raw)")
+
+    rng = random.Random(42)
+    n_per_class = min(len(good_urls), len(bad_urls), max_per_class)
+    good_sample = rng.sample(good_urls, n_per_class)
+    bad_sample = rng.sample(bad_urls, n_per_class)
+    print(f"Balanced sample: {n_per_class} per class ({2 * n_per_class} total)")
+
+    urls = good_sample + bad_sample
+    labels = [0] * len(good_sample) + [1] * len(bad_sample)
+
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+    from ml.url_model import url_model
+
+    X_train, X_val, y_train, y_val = train_test_split(
+        urls, labels, test_size=test_size, stratify=labels, random_state=42,
+    )
+
+    success = url_model.train_baseline(X_train, y_train)
+    if not success:
+        return False
+
+    X_val_vec = url_model.vectorizer.transform(X_val)
+    y_pred = url_model.classifier.predict(X_val_vec)
+
+    acc = accuracy_score(y_val, y_pred) * 100
+    prec = precision_score(y_val, y_pred) * 100
+    rec = recall_score(y_val, y_pred) * 100
+    f1 = f1_score(y_val, y_pred) * 100
+    print(f"Validation ({len(y_val)} samples): "
+          f"Accuracy={acc:.1f}% Precision={prec:.1f}% Recall={rec:.1f}% F1={f1:.1f}%")
+    print(f"URL model saved to {url_model.model_dir}")
     return True
 
 

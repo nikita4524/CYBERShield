@@ -150,15 +150,16 @@ async def submit_quiz_answers(
         
         from models.quiz import QuizQuestion
         import json
-        
+        import uuid
         correct_count = 0
         results = []
-        
+
         for answer in answers:
             question_id = answer.get('question_id')
             selected = answer.get('selected_option_index')
-            
-            question = db.query(QuizQuestion).filter(QuizQuestion.id == question_id).first()
+
+            q_id = uuid.UUID(question_id) if isinstance(question_id, str) else question_id
+            question = db.query(QuizQuestion).filter(QuizQuestion.id == q_id).first()
             if question:
                 is_correct = (selected == question.correct_option_index)
                 if is_correct:

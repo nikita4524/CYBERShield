@@ -17,6 +17,7 @@ import {
   ThreatChart,
   type ThreatDistribution,
 } from "@/components/dashboard/threat-chart";
+import { SecurityCenterWidget } from "@/components/dashboard/security-center-widget";
 import { useAuth } from "@/hooks/use-auth";
 import { api } from "@/lib/api";
 import type { AnalysisSummary } from "@/lib/types";
@@ -181,6 +182,9 @@ export default function DashboardPage() {
 
       <StatsCards stats={stats} />
       <QuickAccessTiles />
+
+      {/* Security Center Prevention Section */}
+      <SecurityCenterWidget />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
         <div className="lg:col-span-3">

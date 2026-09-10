@@ -158,7 +158,8 @@ class URLHeuristicsEngine:
         # ── Rule 8: Keyword stuffing in domain ──
         domain_keywords = self._check_domain_keyword_stuffing(domain)
         if len(domain_keywords) >= 2:
-            risk_score += 0.20
+            # Scale with match count so heavily-stuffed domains score higher
+            risk_score += min(0.35, 0.15 + 0.05 * len(domain_keywords))
             result["flags"].append("domain_keyword_stuffing")
             result["details"]["domain_keywords"] = domain_keywords
             result["highlights"].append({

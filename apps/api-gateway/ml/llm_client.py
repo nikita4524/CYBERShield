@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import httpx
 
@@ -74,6 +74,53 @@ async def _call_groq(
     return data["choices"][0]["message"]["content"]
 
 
+async def _call_groq_stream(
+    messages: list[dict],
+    system_prompt: str,
+    model: Optional[str] = None,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+    api_key: Optional[str] = None,
+) -> AsyncIterator[str]:
+    """Call Groq chat completions API with streaming enabled, yielding text deltas."""
+    key = api_key or settings.GROQ_API_KEY
+    if not key:
+        yield _offline_fallback()
+        return
+
+    used_model = model or settings.GROQ_CHAT_MODEL
+    all_msgs = [{"role": "system", "content": system_prompt}] + messages
+
+    body = {
+        "model": used_model,
+        "messages": all_msgs,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        async with client.stream("POST", GROQ_CHAT_URL, json=body, headers=headers) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                payload = line[len("data: "):].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                if delta:
+                    yield delta
+
+
 # ── Public functions ─────────────────────────────────────────────
 
 
@@ -107,6 +154,40 @@ async def ask_chatbot(
     except Exception as exc:
         logger.exception("Groq chat call failed: %s", exc)
         return _offline_fallback()
+
+
+async def ask_chatbot_stream(
+    messages: list[dict],
+    system_prompt: str,
+    temperature: float = 0.7,
+    max_tokens: int = 4096,
+) -> AsyncIterator[str]:
+    """
+    Stream chat from the 70B model, yielding text deltas as they arrive.
+    Falls back gracefully (single-chunk) on error.
+    """
+    try:
+        async for delta in _call_groq_stream(
+            messages=messages,
+            system_prompt=system_prompt,
+            model=settings.GROQ_CHAT_MODEL,       # 70B
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=settings.GROQ_API_KEY,
+        ):
+            yield delta
+    except httpx.HTTPStatusError as exc:
+        logger.error("Groq chat stream API error: %s — %s", exc.response.status_code, exc.response.text)
+        if exc.response.status_code == 429:
+            yield (
+                "⚠️ I've hit my rate limit. Please wait a minute and try again.\n\n"
+                "In the meantime: report cyber fraud at **cybercrime.gov.in** or call **1930**."
+            )
+        else:
+            yield _offline_fallback()
+    except Exception as exc:
+        logger.exception("Groq chat stream call failed: %s", exc)
+        yield _offline_fallback()
 
 
 async def generate_quiz_llm(

@@ -225,10 +225,13 @@ def _is_lookalike(domain: str, reference: str) -> bool:
     if ref_base in domain_base and domain_base != ref_base:
         return True
 
-    # Simple edit distance check (levenshtein-like)
+    # Simple edit distance check (levenshtein-like).
+    # Short bases (e.g. "sbi") need a tighter threshold — otherwise
+    # unrelated 3-letter domains would false-positive against them.
     if abs(len(domain_base) - len(ref_base)) <= 2:
         differences = sum(1 for a, b in zip(domain_base, ref_base) if a != b)
-        if differences <= 2 and len(domain_base) > 3:
+        max_differences = 1 if len(domain_base) <= 3 else 2
+        if differences <= max_differences:
             return True
 
     # Common homoglyph substitutions

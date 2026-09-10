@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Bot, Newspaper, GraduationCap } from "lucide-react";
+import { useState, Suspense } from "react";
+import { Bot, Newspaper, GraduationCap, Loader2 } from "lucide-react";
 import { ChatPanel } from "@/components/assistant/chat-panel";
 import { type AssistantMode } from "@/components/assistant/mode-toggle";
 
@@ -61,8 +61,17 @@ export default function AssistantPage() {
         </div>
       </div>
 
-      {/* ── Chat panel ── */}
-      <ChatPanel mode={mode} />
+      {/* ── Chat panel with Suspense for useSearchParams ── */}
+      <Suspense
+        fallback={
+          <div className="flex-1 flex items-center justify-center gap-2 text-zinc-500 text-sm">
+            <Loader2 className="h-5 w-5 animate-spin text-cyan-500" />
+            <span>Loading CyberShield Assistant...</span>
+          </div>
+        }
+      >
+        <ChatPanel mode={mode} />
+      </Suspense>
     </div>
   );
 }

@@ -1,6 +1,7 @@
 """Pydantic schemas for CyberShield Assistant endpoints."""
 
 from __future__ import annotations
+from typing import Optional
 from pydantic import BaseModel, Field
 
 
@@ -66,3 +67,27 @@ class NewsItem(BaseModel):
 class NewsResponse(BaseModel):
     articles: list[NewsItem]
     resources: list[dict] = []
+
+
+class ThreatContext(BaseModel):
+    threat_type: str = Field(..., description="phishing_url | phishing_email | malicious_qr | deepfake_audio | deepfake_video | deepfake_image")
+    risk_score: int = Field(..., ge=0, le=100)
+    action: str = Field(..., description="ALLOW | WARN | RESTRICT | BLOCK | QUARANTINE | FLAG")
+    severity: str = Field(..., description="SAFE | MEDIUM | HIGH | CRITICAL")
+    reasons: list[str] = Field(default_factory=list)
+    input_reference: Optional[str] = None
+
+
+class ThreatExplanationRequest(BaseModel):
+    threat_context: ThreatContext
+    user_query: Optional[str] = None
+
+
+class ThreatExplanationResponse(BaseModel):
+    explanation: str
+    action: str
+    severity: str
+    risk_score: int
+    recommended_steps: list[str] = Field(default_factory=list)
+    things_to_avoid: list[str] = Field(default_factory=list)
+    reporting_channels: list[str] = Field(default_factory=list)

@@ -24,6 +24,11 @@ import type {
   IoTAlert,
   IoTAlertListResponse,
   RegisterIoTDeviceRequest,
+  SecurityIncident,
+  IncidentListResponse,
+  IncidentStats,
+  ThreatExplanationRequest,
+  ThreatExplanationResponse,
 } from "./types";
 
 export interface EmailAnalysisRequest {
@@ -434,6 +439,56 @@ class ApiClient {
   resolveIoTAlert(alertId: string) {
     return this.request<IoTAlert>(`/iot/alerts/${alertId}/resolve`, {
       method: "PATCH",
+    });
+  }
+
+  /* ── Security Incidents ── */
+  getIncidents(params: {
+    page?: number;
+    limit?: number;
+    threat_type?: string;
+    severity?: string;
+    action?: string;
+    status?: string;
+    source?: string;
+  } = {}) {
+    const searchParams = new URLSearchParams();
+    if (params.page) searchParams.set("page", String(params.page));
+    if (params.limit) searchParams.set("limit", String(params.limit));
+    if (params.threat_type) searchParams.set("threat_type", params.threat_type);
+    if (params.severity) searchParams.set("severity", params.severity);
+    if (params.action) searchParams.set("action", params.action);
+    if (params.status) searchParams.set("status", params.status);
+    if (params.source) searchParams.set("source", params.source);
+
+    const query = searchParams.toString();
+    return this.request<IncidentListResponse>(`/incidents${query ? `?${query}` : ""}`);
+  }
+
+  getIncident(idOrNumber: string) {
+    return this.request<SecurityIncident>(`/incidents/${idOrNumber}`);
+  }
+
+  updateIncidentStatus(
+    idOrNumber: string,
+    status: "OPEN" | "REVIEWING" | "RESOLVED" | "FALSE_POSITIVE",
+    resolution_note?: string
+  ) {
+    return this.request<SecurityIncident>(`/incidents/${idOrNumber}`, {
+      method: "PATCH",
+      body: JSON.stringify({ status, resolution_note }),
+    });
+  }
+
+  getIncidentStats() {
+    return this.request<IncidentStats>("/incidents/stats");
+  }
+
+  /* ── Threat Explanation (AI Security Context) ── */
+  explainThreat(data: ThreatExplanationRequest) {
+    return this.request<ThreatExplanationResponse>("/assistant/analyze-context", {
+      method: "POST",
+      body: JSON.stringify(data),
     });
   }
 }

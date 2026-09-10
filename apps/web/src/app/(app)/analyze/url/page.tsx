@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { UrlForm } from '@/components/analyze/url-form';
 import { QrUpload } from '@/components/analyze/qr-upload';
 import { ResultCard, type AnalysisResult } from '@/components/analyze/result-card';
+import { PreventionBanner } from '@/components/analyze/prevention-banner';
 import { ExplanationPanel } from '@/components/analyze/explanation-panel';
 import { AwarenessTip } from '@/components/analyze/awareness-tip';
 import { PageHeader } from '@/components/shared/page-header';
@@ -188,6 +189,17 @@ export default function UrlAnalyzerPage() {
             transition={{ duration: 0.25 }}
             className="space-y-4"
           >
+            <PreventionBanner
+              action={(result as any).action || (result.risk_score >= 81 ? 'BLOCK' : result.risk_score >= 61 ? 'RESTRICT' : result.risk_score >= 31 ? 'WARN' : 'ALLOW')}
+              severity={(result as any).severity || (result.risk_score >= 81 ? 'CRITICAL' : result.risk_score >= 61 ? 'HIGH' : result.risk_score >= 31 ? 'MEDIUM' : 'SAFE')}
+              riskScore={result.risk_score}
+              message={(result as any).prevention?.message}
+              reasons={(result as any).reasons || (result as any).prevention?.reasons || []}
+              incidentId={(result as any).prevention?.incident_id}
+              source={activeTab === 'url' ? 'url' : 'qr'}
+              inputReference={result.decoded?.raw || (result as any).url}
+            />
+
             {result.decoded && <DecodedPayload decoded={result.decoded} />}
             <ResultCard result={result} />
             <ExplanationPanel explanation={result.explanation} />
