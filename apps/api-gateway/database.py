@@ -21,8 +21,8 @@ def _create_engine():
     """
     Create the SQLAlchemy engine.
     - TESTING=true  → lightweight SQLite (in-memory style)
-    - Postgres URL   → try to connect; if DEBUG=true and it fails, fall back to
-                       a local SQLite dev.db so the app starts without Postgres
+    - PostgreSQL URL → connect to PostgreSQL with timeout
+    - SQLite URL (default) → local SQLite database
     """
     if TESTING:
         return create_engine(
@@ -31,12 +31,35 @@ def _create_engine():
             poolclass=StaticPool,
         )
 
-    # Use SQLite directly (no PostgreSQL)
-    return create_engine(
-        "sqlite:///./cybershield.db",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    # Use DATABASE_URL from environment
+    db_url = DATABASE_URL
+    
+    if db_url.startswith("postgresql"):
+        # PostgreSQL: add connection timeout for fast failure
+        try:
+            return create_engine(
+                db_url,
+                connect_args={'connect_timeout': 5}
+            )
+        except Exception as e:
+            # If PostgreSQL unavailable and DEBUG mode, fall back to SQLite
+            if DEBUG:
+                import logging
+                logging.warning(f"PostgreSQL connection failed: {e}. Falling back to SQLite in DEBUG mode.")
+                return create_engine(
+                    "sqlite:///./cybershield.db",
+                    connect_args={"check_same_thread": False},
+                    poolclass=StaticPool,
+                )
+            else:
+                raise
+    else:
+        # SQLite: use check_same_thread=False and StaticPool
+        return create_engine(
+            db_url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
 
 
 engine = _create_engine()
