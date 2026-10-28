@@ -40,6 +40,24 @@ class AudioAnalyzer:
     def __init__(self):
         from ml.model_loader import ModelLoader
         self._loader = ModelLoader()
+        # Load both TensorFlow (.h5) and PyTorch (.pt) audio models if present
+        from pathlib import Path
+        self._tf_model = None
+        self._pt_model = None
+        try:
+            tf_path = Path(settings.audio_model_path("h5"))
+            if tf_path.is_file():
+                self._tf_model = self._loader._try_keras(tf_path)
+        except Exception as e:
+            logger.debug("TensorFlow audio model load failed: %s", e)
+        try:
+            pt_path = Path(settings.audio_model_path("pt"))
+            if pt_path.is_file():
+                self._pt_model = self._loader._try_torch_full(pt_path)
+        except Exception as e:
+            logger.debug("PyTorch audio model load failed: %s", e)
+        # Fallback single model reference
+        self._single_model = self._loader.get_audio_model()
 
     def analyze(self, file_path: str) -> AudioAnalysisResult:
         """
@@ -72,14 +90,46 @@ class AudioAnalyzer:
             return result
 
         # 2. ML inference
-        model = self._loader.get_audio_model()
-        if model is not None:
-            ai_prob = predict_audio(model, spectrogram)
-            result.ai_probability = ai_prob
-            result.confidence = self._compute_confidence(ai_prob)
+        # --- Ensemble inference for audio models (TF and PyTorch) ---
+        ensemble_probs: list[float] = []
+        # TensorFlow model
+        if self._tf_model is not None:
+            try:
+                tf_prob = predict_audio(self._tf_model, spectrogram)
+                ensemble_probs.append(tf_prob)
+                logger.debug("TF audio model prediction: %.4f", tf_prob)
+            except Exception as e:
+                logger.debug("TF audio inference failed: %s", e)
+        # PyTorch model
+        if self._pt_model is not None:
+            try:
+                pt_prob = predict_audio(self._pt_model, spectrogram)
+                ensemble_probs.append(pt_prob)
+                logger.debug("PT audio model prediction: %.4f", pt_prob)
+            except Exception as e:
+                logger.debug("PT audio inference failed: %s", e)
+        # Fallback single model
+        if not ensemble_probs and self._single_model is not None:
+            try:
+                single_prob = predict_audio(self._single_model, spectrogram)
+                ensemble_probs.append(single_prob)
+                logger.debug("Fallback audio model prediction: %.4f", single_prob)
+            except Exception as e:
+                logger.debug("Fallback audio inference failed: %s", e)
+        if ensemble_probs:
+            avg_prob = float(np.mean(ensemble_probs))
+            result.ai_probability = avg_prob
+            result.confidence = self._compute_confidence(avg_prob)
             result.model_available = True
-            logger.info("Audio model prediction: %.4f (confidence: %.4f)",
-                        ai_prob, result.confidence)
+            result.metadata["ensemble_mean"] = round(avg_prob, 4)
+            result.metadata["ensemble_max"] = round(float(max(ensemble_probs)), 4)
+            logger.info("Ensemble audio model predictions: %d scores, avg=%.3f, confidence=%.4f",
+                        len(ensemble_probs), avg_prob, result.confidence)
+        else:
+            result.ai_probability = 0.5
+            result.confidence = 0.0
+            result.flags.append("model_not_loaded")
+            logger.warning("No audio model loaded — heuristics only")
         else:
             result.ai_probability = 0.5
             result.confidence = 0.0
@@ -98,10 +148,20 @@ class AudioAnalyzer:
             logger.warning("Heuristic extraction failed: %s", e)
             result.rule_score = 0.0
 
-        # 4. Add calibration-aware flags
+        # 4. Apply confidence‑based gating before calibration flags
+        CONFIDENCE_THRESHOLD = 0.2
+        if result.confidence < CONFIDENCE_THRESHOLD:
+            weight_ai = result.confidence / CONFIDENCE_THRESHOLD
+            weight_rule = 1.0 - weight_ai
+            gated_ai = result.ai_probability * weight_ai + result.rule_score * weight_rule
+            logger.debug("Confidence gating applied: confidence=%.2f, weight_ai=%.2f, weight_rule=%.2f, gated_ai=%.3f",
+                        result.confidence, weight_ai, weight_rule, gated_ai)
+            result.ai_probability = gated_ai
+
+        # 5. Add calibration‑aware flags
         self._add_calibration_flags(result)
 
-        # 5. Store calibration metadata for UI
+        # 6. Store calibration metadata for UI
         result.metadata["calibration"] = {
             "safe_threshold": self.SAFE_UPPER,
             "dangerous_threshold": self.DANGEROUS_LOWER,

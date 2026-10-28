@@ -30,10 +30,13 @@ import {
   Clock,
   Filter,
   RefreshCw,
+  FileDown,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { api } from '@/lib/api';
 import { motion } from 'framer-motion';
+import { toast } from 'sonner';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -130,7 +133,31 @@ export default function AnalysesReportPage() {
   const [total, setTotal] = useState(0);
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [mounted, setMounted] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const limit = 10;
+
+  const handleDownloadPdf = async (item: AnalysisSummary) => {
+    try {
+      setDownloadingId(item.id);
+      try {
+        await api.downloadAnalysisPdfById(item.id);
+      } catch {
+        // Fallback to direct export if running from local guest cache
+        await api.exportAnalysisPdf({
+          analysis_id: item.id,
+          type: item.type,
+          risk_score: item.risk_score,
+          risk_label: item.risk_label,
+          explanation_summary: item.explanation_summary,
+        });
+      }
+      toast.success('Forensic report downloaded successfully!');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to download report');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   // Prevent hydration mismatch from Select (Radix generates random IDs)
   useEffect(() => {
@@ -196,6 +223,18 @@ export default function AnalysesReportPage() {
         description="View all your past threat analyses and their results."
         icon={FileText}
       />
+
+      {/* Guest mode banner */}
+      {mounted && !localStorage.getItem('access_token') && (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/8 px-4 py-3 text-xs text-amber-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />
+          <div className="flex-1">
+            <span className="font-semibold">Guest Mode:</span> Your analyses are stored in your browser only and will be lost if you clear browser data.{' '}
+            <a href="/auth/login" className="underline hover:text-amber-200 font-medium">Sign in</a> to save your history permanently to the cloud.
+          </div>
+        </div>
+      )}
+
 
       {/* Filters — only render after mount to avoid hydration mismatch */}
       {mounted && (
@@ -305,7 +344,7 @@ export default function AnalysesReportPage() {
                       </p>
                     </div>
 
-                    <div className="flex shrink-0 items-center gap-3">
+                    <div className="flex shrink-0 items-center gap-2.5">
                       <span className="font-mono text-sm font-bold text-zinc-300">
                         {a.risk_score}
                       </span>
@@ -319,6 +358,23 @@ export default function AnalysesReportPage() {
                         <LabelIcon className="h-3 w-3" />
                         {a.risk_label}
                       </Badge>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={downloadingId === a.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDownloadPdf(a);
+                        }}
+                        title="Download Forensic PDF Report"
+                        className="h-8 w-8 p-0 text-zinc-400 hover:text-cyan-400 hover:bg-cyan-500/10 rounded-md transition-colors"
+                      >
+                        {downloadingId === a.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-cyan-400" />
+                        ) : (
+                          <FileDown className="h-4 w-4" />
+                        )}
+                      </Button>
                     </div>
                   </motion.div>
                 );

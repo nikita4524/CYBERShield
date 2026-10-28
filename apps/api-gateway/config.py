@@ -54,8 +54,8 @@ class Settings(BaseSettings):
 
     # ── Groq AI (free at console.groq.com) ──
     GROQ_API_KEY: str = ""                          # main key for chat
-    GROQ_CHAT_MODEL: str = "llama-3.3-70b-versatile"  # best quality, 30 RPM
-    GROQ_QUIZ_MODEL: str = "llama-3.1-8b-instant"   # faster, 14.4K RPD
+    GROQ_CHAT_MODEL: str = "qwen/qwen3.8-27b"       # best available model
+    GROQ_QUIZ_MODEL: str = "qwen/qwen3.8-27b"       # quiz generation model
     GROQ_QUIZ_API_KEY: str = ""                      # optional separate key for quiz (more quota)
     CHATBOT_ENABLED: bool = True
 

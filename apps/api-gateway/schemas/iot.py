@@ -94,3 +94,70 @@ class AlertListResponse(BaseModel):
 class SeedDemoResponse(BaseModel):
     message: str
     devices: List[DeviceResponse]
+
+
+# ── Simulation event types exposed to the frontend ──────────────────────────
+class SimEventType(str, Enum):
+    """
+    Simulation-only event categories.
+    These map onto the three low-level IoT event types (connection/motion/traffic)
+    and pre-fill the data payload so the existing rule engine can evaluate them.
+    They are NOT real hardware events.
+    """
+    NORMAL_ACTIVITY   = "normal_activity"
+    BRUTE_FORCE       = "brute_force"
+    SUSPICIOUS_DNS    = "suspicious_dns"
+    UNKNOWN_DEVICE    = "unknown_device"
+    NETWORK_ANOMALY   = "network_anomaly"
+    DEVICE_OFFLINE    = "device_offline"
+
+
+class TelemetryIngestRequest(BaseModel):
+    """
+    Validated request body for POST /iot/telemetry.
+    Replaces the previous untyped dict.
+    """
+    device_id: str = Field(..., description="UUID of the registered virtual device")
+    # Low-level IoT event type understood by the rule engine
+    event_type: IoTEventType = Field(..., description="connection | motion | traffic")
+    # Free-form data payload evaluated by the rule engine
+    data: Dict[str, Any] = Field(default_factory=dict, description="Event payload")
+    # Optional simulated MAC for unknown-device scenarios
+    mac_address: Optional[str] = Field(None, max_length=17)
+
+    model_config = {"json_schema_extra": {
+        "example": {
+            "device_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+            "event_type": "traffic",
+            "data": {"dns_query": "malware-c2.xyz"},
+        }
+    }}
+
+
+class TelemetryIngestResponse(BaseModel):
+    """What the telemetry endpoint returns after processing."""
+    telemetry_id: str
+    device_id: Optional[str] = None
+    event_type: str
+    alerts_created: int
+    risk_score: int
+    risk_label: str
+
+
+class TelemetryRecord(BaseModel):
+    """A single telemetry entry for the history panel."""
+    id: str
+    device_id: Optional[str] = None
+    event_type: str
+    data: Dict[str, Any]
+    alert_triggered: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class TelemetryHistoryResponse(BaseModel):
+    total: int
+    page: int
+    limit: int
+    items: List[TelemetryRecord]

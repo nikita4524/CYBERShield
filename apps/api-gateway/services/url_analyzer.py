@@ -1,16 +1,35 @@
 """
 URL analysis service — fully self-contained heuristic engine.
-No ML model dependencies. Analyzes URLs for phishing indicators.
+
+Key design decisions:
+  - UNKNOWN DOMAIN BASELINE: Any URL whose domain is not on the explicit
+    whitelist starts at 0.20 ("suspicious-until-cleared"), not 0.0. This
+    prevents totally clean-looking phishing URLs from scoring SAFE just
+    because they happen to use HTTPS and avoid obvious keyword traps.
+
+  - BLOCKLIST: ~400K bad domains extracted from data/url_dataset.csv are
+    loaded at startup into a frozenset for O(1) lookup. A blocklisted
+    domain raises the score to ≥ 0.85 (DANGEROUS threshold).
+
+  - INVALID URL FLAGGING: Empty hostnames, bare-scheme-only strings, and
+    un-parseable inputs are explicitly flagged instead of silently scoring
+    0.0 or returning a catch-all 0.8.
+
+  - QR INTEGRATION: qr_analyzer._analyze_url_content() already calls
+    url_analyzer.analyze() for URL-type QR payloads — no change needed.
 """
 
-import re
-import time
+import csv
 import math
+import os
+import re
 import socket
+import time
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse, parse_qs, unquote
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlparse, unquote
 
 from utils.text_preprocessing import (
     INDIAN_BANKS,
@@ -19,10 +38,10 @@ from utils.text_preprocessing import (
 
 logger = logging.getLogger(__name__)
 
-# ── Known-bad / suspicious lists ──────────────────────────────────────
+# ── Threat lists ──────────────────────────────────────────────────
 
 SUSPICIOUS_TLDS = {
-    ".tk", ".ml", ".ga", ".cf", ".gq",   # free TLDs
+    ".tk", ".ml", ".ga", ".cf", ".gq",
     ".buzz", ".top", ".xyz", ".club", ".online", ".site", ".icu",
     ".work", ".click", ".link", ".info", ".pw", ".cc",
     ".ws", ".loan", ".racing", ".win", ".download", ".stream",
@@ -45,22 +64,17 @@ PHISHING_KEYWORDS = [
     "authenticate", "wallet", "paypal", "apple", "microsoft",
     "amazon", "netflix", "facebook", "instagram", "google",
     "ebay", "chase", "wells", "citi", "hsbc",
-    # India-specific phishing vocabulary — this product's primary threat
-    # surface (UPI / net-banking scams), previously uncovered here.
+    # India-specific phishing vocabulary
     "kyc", "netbanking", "otp", "upi", "aadhaar", "pancard",
 ]
 
 # Words a scammer glues directly onto a bank code with no separator
-# (e.g. "axisbank", "sbisecure") — used only to disambiguate genuine
-# bank-name abuse from incidental substrings like "axis" inside "taxis".
 BANK_ABUSE_SUFFIX_WORDS = [
     "bank", "secure", "verify", "login", "kyc", "netbanking",
     "online", "update", "confirm", "alert", "support",
 ]
 
-# Global brand/service domains considered legitimate out of the box,
-# merged with the shared Indian-bank/fintech whitelist so the same
-# "legitimate domain" bonus and impersonation guards apply everywhere.
+# Global brand/service domains considered legitimate out of the box
 LEGITIMATE_DOMAINS = {
     "google.com", "youtube.com", "facebook.com", "amazon.com",
     "apple.com", "microsoft.com", "github.com", "stackoverflow.com",
@@ -69,6 +83,79 @@ LEGITIMATE_DOMAINS = {
     "instagram.com", "whatsapp.com", "zoom.us",
 } | FINANCIAL_LEGITIMATE_DOMAINS
 
+
+# ── Blocklist loader (runs once at module import) ─────────────────
+
+def _load_domain_blocklist() -> frozenset:
+    """
+    Load bad domains from data/url_dataset.csv.
+
+    The CSV has rows of the form ``some.domain.com/optional/path,bad``.
+    We extract just the hostname (no scheme, no path) and add it to the
+    set. Rows whose URL contains a known-legitimate domain are skipped to
+    avoid accidentally blocklisting CDNs or shared hosts.
+
+    Returns a frozenset for fast O(1) membership tests.
+    """
+    blocklist: set = set()
+
+    # Resolve path relative to this file (services/ → api-gateway/data/)
+    data_dir = Path(__file__).resolve().parent.parent / "data"
+    csv_path = data_dir / "url_dataset.csv"
+
+    if not csv_path.exists():
+        logger.warning("url_dataset.csv not found at %s — blocklist disabled", csv_path)
+        return frozenset()
+
+    # Domains that should never be blocklisted even if specific paths on
+    # them appear in the bad-URL dataset (the path was malicious, not the
+    # domain as a whole — e.g. bit.ly/malicious-path).
+    _BLOCKLIST_EXCLUSIONS = frozenset({
+        # URL shorteners — paths are what's bad, not the domain
+        "bit.ly", "tinyurl.com", "goo.gl", "t.co", "ow.ly", "is.gd",
+        "buff.ly", "adf.ly", "bit.do", "rb.gy", "cutt.ly", "shorturl.at",
+        "rebrand.ly", "lnkd.in", "shorte.st", "v.gd", "qr.ae",
+        # CDNs and shared hosting that show up as collateral
+        "amazonaws.com", "cloudfront.net", "akamaihd.net",
+        "googleusercontent.com", "fbcdn.net", "twimg.com",
+        # Major platforms where individual pages can be malicious
+        "blogspot.com", "wordpress.com", "weebly.com", "wix.com",
+        "github.io", "netlify.app", "vercel.app",
+    })
+
+    try:
+        with open(csv_path, newline="", encoding="utf-8", errors="replace") as fh:
+            reader = csv.reader(fh)
+            next(reader, None)  # skip header
+            for row in reader:
+                if len(row) < 2:
+                    continue
+                raw_url, label = row[0].strip(), row[1].strip().lower()
+                if label != "bad":
+                    continue
+                # Ensure parseable
+                if not raw_url.startswith(("http://", "https://")):
+                    raw_url = "http://" + raw_url
+                try:
+                    hostname = urlparse(raw_url).hostname or ""
+                except Exception:
+                    continue
+                hostname = hostname.lower().lstrip("www.")
+                if hostname and len(hostname) > 3 and hostname not in _BLOCKLIST_EXCLUSIONS:
+                    blocklist.add(hostname)
+
+        logger.info("URL blocklist loaded: %d domains", len(blocklist))
+    except Exception as exc:
+        logger.error("Failed to load url_dataset.csv: %s", exc)
+
+    return frozenset(blocklist)
+
+
+# Module-level singleton — loaded once when the worker starts
+_DOMAIN_BLOCKLIST: frozenset = _load_domain_blocklist()
+
+
+# ── Result dataclass ──────────────────────────────────────────────
 
 @dataclass
 class URLAnalysisResult:
@@ -82,8 +169,19 @@ class URLAnalysisResult:
     processing_time_ms: int = 0
 
 
+# ── Analyzer ──────────────────────────────────────────────────────
+
 class URLAnalyzer:
     """Analyzes URLs for phishing and malicious indicators using heuristics."""
+
+    # ── Scoring constants ──
+    # Start here for any URL whose domain is not on the whitelist.
+    # Rationale: we cannot distinguish a brand-new legitimate domain from
+    # an attacker-registered one by structure alone, so "unknown" should
+    # land in the suspicious band (30–69), not SAFE (< 30).
+    # 0.31 puts the raw score just above the safe_threshold=30 (i.e. 31)
+    # so it maps to "suspicious" with no other signals.
+    _UNKNOWN_BASELINE = 0.31
 
     def analyze(self, url: str) -> URLAnalysisResult:
         """Analyze a single URL with comprehensive heuristic checks."""
@@ -91,33 +189,77 @@ class URLAnalyzer:
         flags: List[str] = []
         features: Dict[str, Any] = {}
         highlights: List[Dict] = []
-        score = 0.0  # 0 = safe, 1 = malicious
 
-        # ── Normalise ──
-        if not url.startswith(("http://", "https://")):
+        # ── 0. Normalise ──────────────────────────────────────────
+        original_url = url.strip()
+        if not original_url:
+            return URLAnalysisResult(
+                probability=0.70,
+                rule_score=0.70,
+                confidence=0.90,
+                flags=["empty_url"],
+                features={"error": "Empty input"},
+                processing_time_ms=1,
+            )
+
+        url = original_url
+
+        # ── Dangerous schemes — bail out immediately before normalisation ──
+        url_lower_raw = url.lower().lstrip()
+        if url_lower_raw.startswith("javascript:") or url_lower_raw.startswith("data:"):
+            scheme = url_lower_raw.split(":")[0]
+            return URLAnalysisResult(
+                probability=0.97,
+                rule_score=0.97,
+                confidence=0.99,
+                flags=["dangerous_uri_scheme"],
+                features={"scheme": scheme, "raw": original_url[:200]},
+                highlights=[{
+                    "type": "scheme",
+                    "value": scheme,
+                    "reason": f"'{scheme}:' URIs are never used in legitimate links and are a common XSS/injection vector",
+                }],
+                processing_time_ms=int((time.time() - start_time) * 1000),
+            )
+
+        if not url.startswith(("http://", "https://", "upi://")):
             url = "https://" + url
 
+        # ── 0b. Parse ─────────────────────────────────────────────
         try:
             parsed = urlparse(url)
         except Exception:
             return URLAnalysisResult(
-                probability=0.8,
-                rule_score=0.8,
-                confidence=0.9,
-                flags=["invalid_url_format"],
-                features={"error": "Could not parse URL"},
+                probability=0.75,
+                rule_score=0.75,
+                confidence=0.90,
+                flags=["unparseable_url"],
+                features={"raw": original_url[:200]},
                 processing_time_ms=int((time.time() - start_time) * 1000),
             )
 
-        hostname = (parsed.hostname or "").lower()
+        hostname = (parsed.hostname or "").lower().strip()
         path = parsed.path.lower()
         query = parsed.query.lower()
         full_url_lower = url.lower()
 
-        # Resolved once up front (endswith-based, so multi-part TLDs like
-        # .co.in / .gov.in match correctly) and used to guard every
-        # false-positive-prone rule below instead of patching flags after
-        # the fact.
+        # ── 0c. Validate hostname presence ───────────────────────
+        if not hostname:
+            return URLAnalysisResult(
+                probability=0.75,
+                rule_score=0.75,
+                confidence=0.90,
+                flags=["invalid_url_no_hostname"],
+                features={"raw": original_url[:200], "scheme": parsed.scheme},
+                highlights=[{
+                    "type": "structure",
+                    "value": original_url[:100],
+                    "reason": "URL has no valid hostname — cannot be a real web address",
+                }],
+                processing_time_ms=int((time.time() - start_time) * 1000),
+            )
+
+        # Resolved once up front; used to guard false-positive-prone rules
         is_legitimate = self._is_legitimate_domain(hostname)
 
         features["scheme"] = parsed.scheme
@@ -125,9 +267,33 @@ class URLAnalyzer:
         features["path"] = parsed.path
         features["query"] = parsed.query
         features["url_length"] = len(url)
+        features["is_known_legitimate"] = is_legitimate
+
+        # ── Start score ───────────────────────────────────────────
+        # Whitelisted domains begin at 0 so rules that fire on them
+        # (e.g. long path, redirect param) don't unfairly inflate their
+        # score. Unknown domains start above the safe_threshold (0.30)
+        # so a structurally clean but unrecognised domain lands in
+        # "suspicious" rather than "safe" — unknown ≠ safe.
+        score = 0.0 if is_legitimate else self._UNKNOWN_BASELINE
 
         # ─────────────────────────────────────────────────────────
-        # 1. HTTPS check
+        # 1. Blocklist check  (highest-confidence signal)
+        # ─────────────────────────────────────────────────────────
+        bare_host = hostname.lstrip("www.")
+        blocklisted = (bare_host in _DOMAIN_BLOCKLIST or hostname in _DOMAIN_BLOCKLIST)
+        features["blocklisted"] = blocklisted
+        if blocklisted and not is_legitimate:
+            score = max(score, 0.85)
+            flags.append("blocklisted_domain")
+            highlights.append({
+                "type": "hostname",
+                "value": hostname,
+                "reason": "Domain is on the known-malicious blocklist",
+            })
+
+        # ─────────────────────────────────────────────────────────
+        # 2. HTTPS check
         # ─────────────────────────────────────────────────────────
         if parsed.scheme == "http":
             score += 0.10
@@ -140,7 +306,7 @@ class URLAnalyzer:
         features["is_https"] = parsed.scheme == "https"
 
         # ─────────────────────────────────────────────────────────
-        # 2. IP address instead of domain
+        # 4. IP address instead of domain
         # ─────────────────────────────────────────────────────────
         is_ip = self._is_ip_address(hostname)
         features["uses_ip_address"] = is_ip
@@ -154,7 +320,7 @@ class URLAnalyzer:
             })
 
         # ─────────────────────────────────────────────────────────
-        # 3. Suspicious TLD
+        # 5. Suspicious TLD
         # ─────────────────────────────────────────────────────────
         tld = self._get_tld(hostname)
         features["tld"] = tld
@@ -168,7 +334,7 @@ class URLAnalyzer:
             })
 
         # ─────────────────────────────────────────────────────────
-        # 4. URL length
+        # 6. URL length
         # ─────────────────────────────────────────────────────────
         url_len = len(url)
         if url_len > 150:
@@ -185,7 +351,7 @@ class URLAnalyzer:
         )
 
         # ─────────────────────────────────────────────────────────
-        # 5. Subdomain count
+        # 7. Subdomain count
         # ─────────────────────────────────────────────────────────
         subdomain_count = self._count_subdomains(hostname)
         features["subdomain_count"] = subdomain_count
@@ -197,7 +363,7 @@ class URLAnalyzer:
             flags.append("highly_nested_subdomains")
 
         # ─────────────────────────────────────────────────────────
-        # 6. URL shortener
+        # 8. URL shortener
         # ─────────────────────────────────────────────────────────
         if hostname in URL_SHORTENERS:
             score += 0.15
@@ -210,7 +376,7 @@ class URLAnalyzer:
         features["is_shortener"] = hostname in URL_SHORTENERS
 
         # ─────────────────────────────────────────────────────────
-        # 7. Non-standard port
+        # 9. Non-standard port
         # ─────────────────────────────────────────────────────────
         port = parsed.port
         features["port"] = port
@@ -224,7 +390,7 @@ class URLAnalyzer:
             })
 
         # ─────────────────────────────────────────────────────────
-        # 8. Special characters: @, //, -, encoded chars
+        # 10. Special characters: @, //, hyphens, encoded chars
         # ─────────────────────────────────────────────────────────
         if "@" in parsed.netloc:
             score += 0.25
@@ -241,27 +407,16 @@ class URLAnalyzer:
             score += 0.10
             flags.append("many_hyphens_in_hostname")
 
-        dot_count = hostname.count(".")
-        features["hostname_dots"] = dot_count
-
-        # Double slash in path (not at start)
         if "//" in path[1:]:
             score += 0.05
             flags.append("double_slash_in_path")
 
-        # Percent-encoded characters in hostname
         if "%" in parsed.netloc:
             score += 0.15
             flags.append("encoded_hostname")
 
         # ─────────────────────────────────────────────────────────
-        # 9. Phishing keywords
-        # A legitimate site's own path (e.g. hdfcbank.com/login) or
-        # domain (google.com contains "google", which is itself in this
-        # list as a brand name to catch impersonation elsewhere) will
-        # trivially match — only meaningful once we know it's *not* a
-        # trusted domain, otherwise this just adds noise that corrupts
-        # the confidence calculation for obviously safe sites.
+        # 11. Phishing keywords (only on non-whitelisted domains)
         # ─────────────────────────────────────────────────────────
         keyword_hits = []
         if not is_legitimate:
@@ -275,18 +430,7 @@ class URLAnalyzer:
             flags.append(f"phishing_keywords_found ({len(keyword_hits)})")
 
         # ─────────────────────────────────────────────────────────
-        # 9b. Indian bank name abuse (e.g. "sbi", "hdfc" in a domain
-        #     that isn't the bank's own site) — previously only checked
-        #     by the email pipeline (ml/url_heuristics.py), never here,
-        #     despite this being the product's primary phishing vector.
-        #
-        #     Matching is deliberately not "bank code anywhere in
-        #     hostname": short codes like "axis"/"pnb" collide with
-        #     ordinary words (e.g. "axis" inside "taxis.com"). Instead we
-        #     require either an exact hyphen/dot-delimited token ("sbi"
-        #     in "sbi-kyc-verify.xyz") or the code glued directly to a
-        #     phishing-domain word ("axisbank" in
-        #     "axisbank-netbanking-login.top").
+        # 12. Indian bank name abuse
         # ─────────────────────────────────────────────────────────
         bank_hit = "" if is_legitimate else self._check_bank_name_abuse(hostname)
         features["bank_name_abuse"] = bank_hit
@@ -296,12 +440,14 @@ class URLAnalyzer:
             highlights.append({
                 "type": "hostname",
                 "value": hostname,
-                "reason": f"Bank name '{bank_hit}' found in a domain that isn't "
-                          f"the bank's official site — likely impersonation",
+                "reason": (
+                    f"Bank name '{bank_hit}' found in a domain that isn't "
+                    "the bank's official site — likely impersonation"
+                ),
             })
 
         # ─────────────────────────────────────────────────────────
-        # 10. Punycode / IDN homograph attack
+        # 13. Punycode / IDN homograph attack
         # ─────────────────────────────────────────────────────────
         if hostname.startswith("xn--") or any(
             part.startswith("xn--") for part in hostname.split(".")
@@ -316,14 +462,7 @@ class URLAnalyzer:
         features["is_punycode"] = "xn--" in hostname
 
         # ─────────────────────────────────────────────────────────
-        # 11. Data URI / javascript
-        # ─────────────────────────────────────────────────────────
-        if url.lower().startswith(("data:", "javascript:")):
-            score = 0.95
-            flags.append("dangerous_uri_scheme")
-
-        # ─────────────────────────────────────────────────────────
-        # 12. Brand impersonation in subdomain
+        # 14. Brand impersonation in subdomain
         # ─────────────────────────────────────────────────────────
         brand_impersonation = None if is_legitimate else self._check_brand_impersonation(hostname)
         if brand_impersonation:
@@ -337,30 +476,31 @@ class URLAnalyzer:
         features["brand_impersonation"] = brand_impersonation
 
         # ─────────────────────────────────────────────────────────
-        # 13. Entropy of hostname (random-looking domains)
+        # 15. Entropy of hostname (random-looking domains)
         # ─────────────────────────────────────────────────────────
         hostname_no_tld = hostname.rsplit(".", 1)[0] if "." in hostname else hostname
         entropy = self._shannon_entropy(hostname_no_tld)
         features["hostname_entropy"] = round(entropy, 3)
-        if entropy > 4.0:
+        if entropy > 4.0 and not is_legitimate:
             score += 0.10
             flags.append("high_entropy_hostname")
 
         # ─────────────────────────────────────────────────────────
-        # 14. Legitimate domain bonus (reduce false positives)
+        # 16. Legitimate domain bonus (reduce false positives)
+        #     Applied as a downward clamp, not a simple subtraction,
+        #     so a whitelisted domain that fired some rules still gets
+        #     a significantly reduced score without going below 0.
         # ─────────────────────────────────────────────────────────
         features["base_domain"] = self._get_base_domain(hostname)
-        features["is_known_legitimate"] = is_legitimate
         if is_legitimate:
             score = max(score - 0.40, 0.0)
 
         # ─────────────────────────────────────────────────────────
-        # 15. Query string analysis
+        # 17. Query string analysis
         # ─────────────────────────────────────────────────────────
         if query:
             qs_params = parse_qs(parsed.query)
             features["query_param_count"] = len(qs_params)
-            # Check for redirect params
             redirect_params = {"redirect", "url", "next", "return", "goto", "dest", "rurl"}
             for param in qs_params:
                 if param.lower() in redirect_params:
@@ -369,30 +509,28 @@ class URLAnalyzer:
                     break
 
         # ─────────────────────────────────────────────────────────
-        # 16. Multi-signal agreement bonus
-        # Several independent weak/moderate signals firing together is
-        # itself strong evidence — a single heuristic score often stays
-        # under the "dangerous" threshold even for obvious phishing URLs
-        # because no individual rule dominates. Reward corroboration
-        # instead of only summing isolated flags.
+        # 18. Multi-signal corroboration bonus
         # ─────────────────────────────────────────────────────────
         signal_count = len(flags)
         if not is_legitimate and signal_count >= 4:
             score += 0.10
             flags.append("multiple_corroborating_signals")
 
-        # ── Clamp final score ──
+        # ── Clamp ─────────────────────────────────────────────────
         final_score = round(min(max(score, 0.0), 1.0), 4)
 
-        # Confidence reflects how decisive the evidence is: a clean URL
-        # with zero red flags is just as high-confidence as one with many
-        # — it's the *ambiguous*, sparsely-flagged middle that's uncertain.
-        if signal_count == 0:
+        # Confidence: zero flags on a non-whitelisted URL means we could
+        # only apply the baseline — low confidence. Zero flags on a known-
+        # legitimate URL is high confidence. Many flags = high confidence.
+        if is_legitimate and signal_count == 0:
             confidence = 0.90
+        elif signal_count == 0:
+            # Only baseline fired — uncertain
+            confidence = 0.45
         else:
             confidence = min(0.55 + signal_count * 0.07, 0.97)
 
-        processing_time_ms = int((time.time() - start_time) * 1000)
+        processing_time_ms = max(1, int((time.time() - start_time) * 1000))
 
         return URLAnalysisResult(
             probability=final_score,
@@ -408,12 +546,7 @@ class URLAnalyzer:
 
     @staticmethod
     def _is_legitimate_domain(hostname: str) -> bool:
-        """
-        Check hostname against the legitimate-domain whitelist using
-        suffix matching (not just the naive last-two-parts base domain),
-        so multi-part TLDs like ``sbi.co.in`` or ``retail.axisbank.co.in``
-        are recognised correctly.
-        """
+        """Check hostname against the whitelist using suffix matching."""
         if not hostname:
             return False
         for legit in LEGITIMATE_DOMAINS:
@@ -423,13 +556,7 @@ class URLAnalyzer:
 
     @staticmethod
     def _check_bank_name_abuse(hostname: str) -> str:
-        """
-        Return the abused Indian bank name if one is found either as its
-        own hyphen/dot-delimited token, or glued directly to a known
-        phishing suffix word. Plain "bank code anywhere in the string"
-        matching is avoided because short codes (axis, pnb, rbl) collide
-        with ordinary English substrings.
-        """
+        """Return abused Indian bank name if found, otherwise empty string."""
         tokens = re.split(r"[^a-z0-9]+", hostname)
         hostname_no_tld = hostname.rsplit(".", 1)[0] if "." in hostname else hostname
         for bank in INDIAN_BANKS:
@@ -447,7 +574,6 @@ class URLAnalyzer:
     @staticmethod
     def _is_ip_address(hostname: str) -> bool:
         """Check if hostname is an IP address."""
-        # Remove brackets for IPv6
         h = hostname.strip("[]")
         try:
             socket.inet_pton(socket.AF_INET, h)
@@ -459,7 +585,6 @@ class URLAnalyzer:
             return True
         except (socket.error, OSError):
             pass
-        # Also check numeric-only patterns like 192.168.1.1
         return bool(re.match(r"^\d{1,3}(\.\d{1,3}){3}$", hostname))
 
     @staticmethod
@@ -472,9 +597,7 @@ class URLAnalyzer:
     def _get_base_domain(hostname: str) -> str:
         """Get base domain (last two parts)."""
         parts = hostname.split(".")
-        if len(parts) >= 2:
-            return ".".join(parts[-2:])
-        return hostname
+        return ".".join(parts[-2:]) if len(parts) >= 2 else hostname
 
     @staticmethod
     def _count_subdomains(hostname: str) -> int:
@@ -509,9 +632,7 @@ class URLAnalyzer:
         ]
         parts = hostname.split(".")
         base = ".".join(parts[-2:]) if len(parts) >= 2 else hostname
-
         for brand in brands:
-            # Brand in subdomain but not the actual domain
             if brand in hostname and brand not in base:
                 return brand
         return None

@@ -91,49 +91,85 @@ async def get_categories(
 @router.post("/quiz-sessions")
 async def create_quiz_session(
     request: Request,
+    current_user=Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
-    """Create a new quiz session and return questions"""
+    """Create a new quiz session, persist to database, and return questions"""
     try:
         body = await request.json()
         category = body.get('category')
         language = body.get('language', 'en')
-        
-        from models.quiz import QuizQuestion
+
+        from models.quiz import QuizQuestion, QuizSession
+        from datetime import datetime, timezone
         import uuid
-        
+        import json
+        import random
+
         # Get questions for category
         questions = db.query(QuizQuestion).filter(
             QuizQuestion.category == category,
-            QuizQuestion.language == language
+            QuizQuestion.language == language,
+            QuizQuestion.is_active == True,
         ).all()
-        
+
         if not questions:
-            raise HTTPException(status_code=404, detail=f"No questions for {category}")
-        
-        # Create session ID
-        session_id = str(uuid.uuid4())
-        
-        # Return questions
+            # Fallback across languages if specific language not seeded
+            questions = db.query(QuizQuestion).filter(
+                QuizQuestion.category == category,
+                QuizQuestion.is_active == True,
+            ).all()
+
+        if not questions:
+            raise HTTPException(status_code=404, detail=f"No questions found for category '{category}'")
+
+        # Pick up to 10 questions
+        selected_questions = list(questions)
+        random.shuffle(selected_questions)
+        selected_questions = selected_questions[:min(10, len(selected_questions))]
+
+        # PERSIST QUIZ SESSION TO DB
+        user_id = current_user.id if current_user else None
+        session = QuizSession(
+            id=uuid.uuid4(),
+            user_id=user_id,
+            category=category,
+            total_questions=len(selected_questions),
+            correct_count=0,
+            score_pct=0,
+            badge_earned=None,
+            started_at=datetime.now(timezone.utc),
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
         questions_response = []
-        for q in questions:
+        for q in selected_questions:
+            opts = q.options
+            if isinstance(opts, str):
+                try:
+                    opts = json.loads(opts)
+                except Exception:
+                    opts = [opts]
             questions_response.append({
                 "id": str(q.id),
                 "question_text": q.question_text,
-                "options": q.options if isinstance(q.options, list) else eval(q.options) if isinstance(q.options, str) else list(q.options),
-                "difficulty": q.difficulty
+                "options": opts if isinstance(opts, list) else list(opts),
+                "difficulty": q.difficulty,
             })
-        
+
         return {
-            "session_id": session_id,
+            "session_id": str(session.id),
             "category": category,
-            "total_questions": len(questions),
-            "questions": questions_response
+            "total_questions": len(questions_response),
+            "questions": questions_response,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -141,16 +177,43 @@ async def create_quiz_session(
 async def submit_quiz_answers(
     session_id: str,
     request: Request,
+    current_user=Depends(get_current_user_optional),
     db: Session = Depends(get_db)
 ):
-    """Submit answers and get results"""
+    """Submit answers, grade them, persist QuizSession and QuizAnswer records to DB, and return results"""
     try:
         body = await request.json()
         answers = body.get('answers', [])
-        
-        from models.quiz import QuizQuestion
+        category = body.get('category', 'unknown')
+
+        from models.quiz import QuizQuestion, QuizSession, QuizAnswer
+        from datetime import datetime, timezone
         import json
         import uuid
+
+        # Retrieve or create session
+        try:
+            sid = uuid.UUID(session_id)
+        except Exception:
+            sid = uuid.uuid4()
+
+        session = db.query(QuizSession).filter(QuizSession.id == sid).first()
+        if not session:
+            user_id = current_user.id if current_user else None
+            session = QuizSession(
+                id=sid,
+                user_id=user_id,
+                category=category,
+                total_questions=len(answers),
+                correct_count=0,
+                score_pct=0,
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(session)
+            db.flush()
+        elif current_user and not session.user_id:
+            session.user_id = current_user.id
+
         correct_count = 0
         results = []
 
@@ -158,21 +221,44 @@ async def submit_quiz_answers(
             question_id = answer.get('question_id')
             selected = answer.get('selected_option_index')
 
-            q_id = uuid.UUID(question_id) if isinstance(question_id, str) else question_id
+            try:
+                q_id = uuid.UUID(question_id) if isinstance(question_id, str) else question_id
+            except Exception:
+                continue
+
             question = db.query(QuizQuestion).filter(QuizQuestion.id == q_id).first()
             if question:
                 is_correct = (selected == question.correct_option_index)
                 if is_correct:
                     correct_count += 1
-                
-                # Parse options if they're stored as JSON string
+
+                # Save answer record to DB
+                try:
+                    existing_ans = db.query(QuizAnswer).filter(
+                        QuizAnswer.quiz_session_id == session.id,
+                        QuizAnswer.question_id == question.id
+                    ).first()
+                    if not existing_ans:
+                        ans_rec = QuizAnswer(
+                            id=uuid.uuid4(),
+                            quiz_session_id=session.id,
+                            question_id=question.id,
+                            selected_option_index=selected if selected is not None else -1,
+                            is_correct=is_correct,
+                            answered_at=datetime.now(timezone.utc),
+                        )
+                        db.add(ans_rec)
+                except Exception:
+                    pass
+
+                # Parse options
                 options = question.options
                 if isinstance(options, str):
                     try:
                         options = json.loads(options)
-                    except:
+                    except Exception:
                         options = [options]
-                
+
                 results.append({
                     "question_id": str(question.id),
                     "question_text": question.question_text,
@@ -180,31 +266,39 @@ async def submit_quiz_answers(
                     "selected_option_index": selected,
                     "correct_option_index": question.correct_option_index,
                     "is_correct": is_correct,
-                    "explanation": question.explanation or "The correct answer is the one you selected." if is_correct else "The correct answer is different."
+                    "explanation": question.explanation or ("Correct answer!" if is_correct else "Incorrect."),
                 })
-        
-        score_pct = int((correct_count / len(answers)) * 100) if answers else 0
-        
-        # Determine badge
+
+        total = max(1, len(answers))
+        score_pct = int(round((correct_count / total) * 100))
+
         badge = None
         if score_pct >= 90:
-            badge = "Gold"
+            badge = "gold"
         elif score_pct >= 70:
-            badge = "Silver"
+            badge = "silver"
         elif score_pct >= 50:
-            badge = "Bronze"
-        
+            badge = "bronze"
+
+        # UPDATE AND COMMIT SESSION
+        session.correct_count = correct_count
+        session.score_pct = score_pct
+        session.badge_earned = badge
+        session.completed_at = datetime.now(timezone.utc)
+        db.commit()
+
         return {
-            "session_id": session_id,
-            "category": body.get('category', 'unknown'),
+            "session_id": str(session.id),
+            "category": session.category,
             "total_questions": len(answers),
             "correct_count": correct_count,
             "score_pct": score_pct,
             "badge_earned": badge,
-            "results": results
+            "results": results,
         }
-        
+
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -297,10 +391,11 @@ async def get_scenario(
     description="Returns aggregated quiz and scenario stats for the authenticated user.",
 )
 async def get_awareness_summary(
-    current_user=Depends(get_current_user_required),
+    current_user=Depends(get_current_user_optional),
     db: Session = Depends(get_db),
 ):
-    summary = quiz_service.get_user_summary(db, user_id=current_user.id)
+    user_id = current_user.id if current_user else None
+    summary = quiz_service.get_user_summary(db, user_id=user_id)
 
     badges = []
     for b in summary.get("badges", []):

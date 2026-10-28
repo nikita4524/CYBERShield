@@ -331,21 +331,19 @@ class QuizService:
         Compute aggregate awareness stats for a user.
         Returns category scores, badges, weakest area, etc.
         """
-        # All completed sessions for this user
-        sessions = (
-            db.query(QuizSession)
-            .filter(
-                QuizSession.user_id == user_id,
-                QuizSession.completed_at.isnot(None),
-            )
-            .all()
-        )
+        # Completed sessions for this user (or anonymous sessions if user_id is None)
+        query = db.query(QuizSession).filter(QuizSession.completed_at.isnot(None))
+        if user_id:
+            query = query.filter(QuizSession.user_id == user_id)
+        else:
+            query = query.filter(QuizSession.user_id.is_(None))
+        sessions = query.all()
 
         total_completed = len(sessions)
 
         if total_completed == 0:
             return {
-                "user_id": str(user_id),
+                "user_id": str(user_id) if user_id else "anonymous",
                 "total_quizzes_completed": 0,
                 "average_score_pct": 0,
                 "badges": [],
@@ -412,7 +410,7 @@ class QuizService:
         unique_badges = list(best_badges.values())
 
         return {
-            "user_id": str(user_id),
+            "user_id": str(user_id) if user_id else "anonymous",
             "total_quizzes_completed": total_completed,
             "average_score_pct": overall_avg,
             "badges": unique_badges,

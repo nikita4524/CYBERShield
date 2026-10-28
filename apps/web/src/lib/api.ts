@@ -19,11 +19,6 @@ import type {
   PaginatedResponse,
   OrgMetrics,
   User,
-  IoTDevice,
-  IoTDeviceListResponse,
-  IoTAlert,
-  IoTAlertListResponse,
-  RegisterIoTDeviceRequest,
   SecurityIncident,
   IncidentListResponse,
   IncidentStats,
@@ -36,6 +31,23 @@ export interface EmailAnalysisRequest {
   body: string;
   sender?: string;
   urls?: string[];
+}
+
+export interface EmlParseResult {
+  subject: string;
+  sender: string;
+  to: string;
+  cc: string;
+  reply_to: string;
+  date: string;
+  body: string;
+  html_body: string;
+  urls: string[];
+  domains: string[];
+  ips: string[];
+  attachments: { name: string; content_type: string }[];
+  headers: Record<string, string>;
+  auth: { spf: string; dkim: string; dmarc: string };
 }
 
 /* ── Local Storage Cache for guest users ── */
@@ -64,6 +76,45 @@ function saveLocalAnalysis(analysis: AnalysisSummary) {
     localStorage.setItem(LOCAL_ANALYSES_KEY, JSON.stringify(updated));
   } catch {
     // Quota exceeded — silently ignore
+  }
+}
+
+/* ── Local Storage Cache for quizzes ── */
+const LOCAL_QUIZZES_KEY = "cs-recent-quizzes";
+const MAX_LOCAL_QUIZZES = 30;
+
+export interface LocalQuizSession {
+  id: string;
+  category: string;
+  total_questions: number;
+  correct_count: number;
+  score_pct: number;
+  badge_earned: string | null;
+  started_at?: string;
+  completed_at: string;
+}
+
+export function getLocalQuizSessions(): LocalQuizSession[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = localStorage.getItem(LOCAL_QUIZZES_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveLocalQuizSession(session: LocalQuizSession) {
+  if (typeof window === "undefined") return;
+  try {
+    const existing = getLocalQuizSessions();
+    const updated = [
+      session,
+      ...existing.filter((s) => s.id !== session.id),
+    ].slice(0, MAX_LOCAL_QUIZZES);
+    localStorage.setItem(LOCAL_QUIZZES_KEY, JSON.stringify(updated));
+  } catch {
+    // Quota exceeded
   }
 }
 
@@ -166,7 +217,7 @@ class ApiClient {
         errorData.message ||
           detailMessage ||
           "An unexpected error occurred",
-        errorData.details || errorData.detail
+        (errorData.details ?? errorData.detail) as Record<string, unknown> | undefined
       );
     }
 
@@ -237,6 +288,15 @@ class ApiClient {
     });
     saveLocalAnalysis(responseToSummary(result, "email"));
     return result;
+  }
+
+  async parseEml(file: File): Promise<EmlParseResult> {
+    const form = new FormData();
+    form.append("file", file);
+    return this.request<EmlParseResult>("/analyze/email/parse-eml", {
+      method: "POST",
+      body: form,
+    });
   }
 
   async analyzeUrl(url: string) {
@@ -354,6 +414,78 @@ class ApiClient {
     return getLocalAnalyses();
   }
 
+  /**
+   * Export an active analysis result as a CERT-In aligned forensic PDF report.
+   */
+  async exportAnalysisPdf(analysis: {
+    analysis_id?: string;
+    type?: string;
+    risk_score: number;
+    risk_label: string;
+    explanation_summary?: string;
+    explanation?: any;
+    model_scores?: any;
+    contributing_factors?: any[];
+  }) {
+    const token = this.getToken();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE_URL}/reports/analyses/export-pdf`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(analysis),
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to generate PDF: ${res.statusText}`);
+    }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    const safeId = (analysis.analysis_id || "evidence").slice(0, 8);
+    a.download = `CyberShield_Forensic_Report_${safeId}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  }
+
+  /**
+   * Download a stored analysis forensic PDF by its database ID.
+   */
+  async downloadAnalysisPdfById(analysisId: string) {
+    const token = this.getToken();
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(`${API_BASE_URL}/reports/analyses/${analysisId}/pdf`, {
+      headers,
+    });
+
+    if (!res.ok) {
+      throw new Error(`Failed to download report: ${res.statusText}`);
+    }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `CyberShield_Forensic_Report_${analysisId.slice(0, 8)}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    window.URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+  }
+
   /* ── Awareness ── */
   getQuizzes(category: string, language = "en") {
     return this.request<QuizResponse>(
@@ -368,14 +500,58 @@ class ApiClient {
     });
   }
 
-  submitQuizAnswers(sessionId: string, answers: QuizAnswer[]) {
-    return this.request<QuizResultResponse>(
+  async submitQuizAnswers(sessionId: string, answers: QuizAnswer[]) {
+    const res = await this.request<QuizResultResponse>(
       `/awareness/quiz-sessions/${sessionId}/answers`,
       {
         method: "POST",
         body: JSON.stringify({ answers }),
       }
     );
+    if (res) {
+      saveLocalQuizSession({
+        id: res.session_id || sessionId,
+        category: res.category || "general",
+        total_questions: res.total_questions || answers.length,
+        correct_count: res.correct_count || 0,
+        score_pct: res.score_pct || 0,
+        badge_earned: res.badge_earned || null,
+        completed_at: new Date().toISOString(),
+      });
+    }
+    return res;
+  }
+
+  async getQuizHistory(page = 1, limit = 20, category?: string) {
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(limit),
+      });
+      if (category && category !== "all") {
+        params.set("category", category);
+      }
+      const res = await this.request<{ total: number; page: number; limit: number; sessions: any[] }>(
+        `/reports/quizzes?${params.toString()}`
+      );
+      if (res && res.sessions && res.sessions.length > 0) {
+        return res;
+      }
+    } catch {
+      // Fallback to local
+    }
+    const local = getLocalQuizSessions();
+    const filtered = category && category !== "all" ? local.filter((s) => s.category === category) : local;
+    return {
+      total: filtered.length,
+      page,
+      limit,
+      sessions: filtered.slice((page - 1) * limit, page * limit),
+    };
+  }
+
+  getLocalQuizSessions(): LocalQuizSession[] {
+    return getLocalQuizSessions();
   }
 
   getScenarios() {
@@ -440,6 +616,29 @@ class ApiClient {
     return this.request<IoTAlert>(`/iot/alerts/${alertId}/resolve`, {
       method: "PATCH",
     });
+  }
+
+  /**
+   * Send a simulated telemetry event to the backend rule engine.
+   * NOT connected to real hardware — simulation only.
+   */
+  simulateTelemetry(data: TelemetryIngestRequest) {
+    return this.request<TelemetryIngestResponse>("/iot/telemetry", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  /**
+   * Fetch recent telemetry history for a registered virtual device.
+   */
+  getIoTTelemetry(deviceId: string, page = 1, limit = 20) {
+    const params = new URLSearchParams({
+      device_id: deviceId,
+      page: String(page),
+      limit: String(limit),
+    });
+    return this.request<IoTTelemetryHistoryResponse>(`/iot/telemetry?${params}`);
   }
 
   /* ── Security Incidents ── */

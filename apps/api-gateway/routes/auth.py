@@ -3,6 +3,7 @@ Authentication routes — OTP flow, token management, user profile.
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+import logging, time
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -26,6 +27,7 @@ from schemas.auth import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════
@@ -81,6 +83,7 @@ async def login(
     request: LoginRequest,
     db: Session = Depends(get_db),
 ):
+    start_time = time.time()
     try:
         user, access_token, refresh_token, expires_in = (
             auth_service.authenticate_with_password(db, request.email, request.password)
@@ -93,8 +96,11 @@ async def login(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
+    finally:
+        duration_ms = (time.time() - start_time) * 1000
+        logger.info(f"Login request for {request.email} took {duration_ms:.2f} ms")
 
-    db.commit()
+
 
     user_response = UserResponse(
         id=str(user.id),

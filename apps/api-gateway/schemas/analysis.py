@@ -174,8 +174,14 @@ class URLAnalysisRequest(BaseModel):
         v = v.strip()
         if not v:
             raise ValueError("URL cannot be empty")
-        # Basic URL validation — allow with or without scheme
-        if not v.startswith(("http://", "https://", "upi://")):
+        v_lower = v.lower()
+        # Pass dangerous schemes through as-is — url_analyzer catches them
+        # and returns a high-risk result. Do NOT prepend https:// here or
+        # urlparse will misinterpret "javascript" as a hostname.
+        if v_lower.startswith(("javascript:", "data:", "vbscript:")):
+            return v
+        # Add scheme for bare hostnames / paths
+        if not v_lower.startswith(("http://", "https://", "upi://")):
             v = "https://" + v
         return v
 

@@ -189,7 +189,11 @@ class ScoringEngine:
         adjustment = 0
         ctx_flags = inp.contextual_flags or []
 
-        if "blocklisted_domain" in ctx_flags:
+        # blocklisted_domain adjustment only applies for email analysis.
+        # For url/qr analysis the blocklist hit is already baked into the
+        # raw heuristic score (score is set to ≥ 0.85 inside url_analyzer),
+        # so adding +20 on top would double-count and push it past 100.
+        if "blocklisted_domain" in ctx_flags and inp.analysis_type not in ("url", "qr"):
             adjustment += 20
             factors.append(
                 {

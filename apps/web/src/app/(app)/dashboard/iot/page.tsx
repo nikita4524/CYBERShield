@@ -8,6 +8,7 @@ import { PageHeader } from '@/components/shared/page-header';
 import { DeviceCard } from '@/components/iot/device-card';
 import { RegisterDeviceDialog } from '@/components/iot/register-device-dialog';
 import { AlertsList } from '@/components/iot/alerts-list';
+import { SimulatorPanel } from '@/components/iot/simulator-panel';
 import { Button } from '@/components/ui/button';
 import { LoadingSpinner } from '@/components/shared/loading-spinner';
 import { api } from '@/lib/api';
@@ -171,6 +172,15 @@ export default function IoTDashboardPage() {
           resolvingId={resolvingId}
         />
       </div>
+
+      {/* ── Telemetry Simulator ─────────────────────────────────────────
+          Sends synthetic events to the existing backend rule engine.
+          No real hardware involved — simulation only.
+      ─────────────────────────────────────────────────────────────── */}
+      <SimulatorPanel
+        devices={devices}
+        onSimulated={() => loadData(true)}
+      />
     </div>
   );
 }

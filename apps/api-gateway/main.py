@@ -29,7 +29,7 @@ from utils.exceptions import setup_exception_handlers
 from dependencies import rate_limit_dependency
 
 # Import routers (will be created in subsequent steps)
-from routes import auth, analyze, awareness, reports, admin, demo, chatbot, iot, incidents
+from routes import auth, analyze, awareness, reports, admin, demo, chatbot, incidents, video_sample
 
 
 @asynccontextmanager
@@ -169,136 +169,14 @@ def create_application() -> FastAPI:
         prefix="/api/v1/assistant",
         tags=["Assistant"],
     )
-    app.include_router(
-        iot.router,
-        prefix="/api/v1/iot",
-        tags=["IoT"],
-    )
+    
+    # IoT router removed
+    
     app.include_router(
         incidents.router,
         prefix="/api/v1/incidents",
         tags=["Incidents"],
     )
-    
-    # ─── Temporary Quiz Routes (Fix for 404) ───
-    
-    class QuizSessionRequest(BaseModel):
-        category: str
-        language: str = "en"
-    
-    @app.post("/api/v1/awareness/quiz-sessions")
-    async def create_quiz_session_fix(request: QuizSessionRequest, db: Session = Depends(get_db)):
-        try:
-            from models.quiz import QuizQuestion
-            import uuid
-            
-            questions = db.query(QuizQuestion).filter(
-                QuizQuestion.category == request.category,
-                QuizQuestion.language == request.language
-            ).all()
-            
-            if not questions:
-                return {
-                    "session_id": "fix_123", 
-                    "category": request.category, 
-                    "total_questions": 0, 
-                    "questions": []
-                }
-            
-            session_id = str(uuid.uuid4())
-            questions_response = []
-            for q in questions[:10]:
-                # Handle options if stored as JSON string
-                options = q.options
-                if isinstance(options, str):
-                    import json
-                    try:
-                        options = json.loads(options)
-                    except:
-                        options = [options]
-                
-                questions_response.append({
-                    "id": str(q.id),
-                    "question_text": q.question_text,
-                    "options": options,
-                    "difficulty": q.difficulty
-                })
-            
-            return {
-                "session_id": session_id,
-                "category": request.category,
-                "total_questions": len(questions_response),
-                "questions": questions_response
-            }
-        except Exception as e:
-            return {"error": str(e), "session_id": "error"}
-    
-    @app.post("/api/v1/awareness/quiz-sessions/{session_id}/answers")
-    async def submit_quiz_answers_fix(
-        session_id: str, 
-        request: Request, 
-        db: Session = Depends(get_db)
-    ):
-        try:
-            body = await request.json()
-            answers = body.get('answers', [])
-            category = body.get('category', 'unknown')
-            
-            from models.quiz import QuizQuestion
-            import json
-            
-            correct_count = 0
-            results = []
-            
-            for answer in answers:
-                question_id = answer.get('question_id')
-                selected = answer.get('selected_option_index')
-                
-                question = db.query(QuizQuestion).filter(QuizQuestion.id == question_id).first()
-                if question:
-                    is_correct = (selected == question.correct_option_index)
-                    if is_correct:
-                        correct_count += 1
-                    
-                    # Parse options
-                    options = question.options
-                    if isinstance(options, str):
-                        try:
-                            options = json.loads(options)
-                        except:
-                            options = [options]
-                    
-                    results.append({
-                        "question_id": str(question.id),
-                        "question_text": question.question_text,
-                        "options": options,
-                        "selected_option_index": selected,
-                        "correct_option_index": question.correct_option_index,
-                        "is_correct": is_correct,
-                        "explanation": question.explanation or "Correct answer!" if is_correct else "Incorrect. The correct answer is different."
-                    })
-            
-            score_pct = int((correct_count / len(answers)) * 100) if answers else 0
-            badge = None
-            if score_pct >= 90:
-                badge = "Gold"
-            elif score_pct >= 70:
-                badge = "Silver"
-            elif score_pct >= 50:
-                badge = "Bronze"
-            
-            return {
-                "session_id": session_id,
-                "category": category,
-                "total_questions": len(answers),
-                "correct_count": correct_count,
-                "score_pct": score_pct,
-                "badge_earned": badge,
-                "results": results
-            }
-        except Exception as e:
-            return {"error": str(e)}
-    
     # Root redirect to docs
     @app.get("/", include_in_schema=False)
     async def root():

@@ -40,6 +40,24 @@ class VideoAnalyzer:
     def __init__(self):
         from ml.model_loader import ModelLoader
         self._loader = ModelLoader()
+        # Load both TensorFlow (.h5) and PyTorch (.pt) video models if present
+        from pathlib import Path
+        self._tf_model = None
+        self._pt_model = None
+        try:
+            tf_path = Path(settings.video_model_path("h5"))
+            if tf_path.is_file():
+                self._tf_model = self._loader._try_keras(tf_path)
+        except Exception as e:
+            logger.debug("TensorFlow video model load failed: %s", e)
+        try:
+            pt_path = Path(settings.video_model_path("pt"))
+            if pt_path.is_file():
+                self._pt_model = self._loader._try_torch_full(pt_path)
+        except Exception as e:
+            logger.debug("PyTorch video model load failed: %s", e)
+        # Fallback to single model reference
+        self._single_model = self._loader.get_video_model()
 
     def analyze(self, file_path: str) -> VideoAnalysisResult:
         from utils.video_preprocessing import (
@@ -93,64 +111,62 @@ class VideoAnalyzer:
             }
 
         # ── 3. ML inference ────────────────────────────────────────
-        model = self._loader.get_video_model()
-
-        if model is not None and face_crops:
+        # --- Ensemble inference for video models (TF and PyTorch) ---
+        ensemble_scores: list[float] = []
+        # TensorFlow model
+        if self._tf_model is not None:
             try:
-                target_size = get_model_input_shape(model)
-                scores = predict_faces_batch(model, face_crops, target_size)
-                result.frame_scores = scores
-                result.model_available = True
-
-                if scores:
-                    # Weighted aggregation — detected faces weigh more than fallback crops
-                    methods = face_info.get("detection_methods", [])
-                    weights = []
-                    for i, s in enumerate(scores):
-                        if i < len(methods):
-                            if methods[i] == "detected":
-                                weights.append(1.0)
-                            elif methods[i] == "center_crop":
-                                weights.append(0.5)
-                            else:
-                                weights.append(0.3)
-                        else:
-                            weights.append(0.5)
-
-                    w_arr = np.array(weights)
-                    s_arr = np.array(scores)
-                    raw_avg = float(np.average(s_arr, weights=w_arr))
-                    result.ai_probability = raw_avg
-
-                    # Confidence = distance from decision boundary (0.5)
-                    # BUT calibrated to our threshold midpoint (0.50)
-                    result.confidence = self._compute_confidence(raw_avg, scores)
-
-                    logger.info(
-                        "Model predictions: min=%.3f max=%.3f mean=%.3f weighted=%.3f confidence=%.3f",
-                        min(scores), max(scores), np.mean(scores),
-                        raw_avg, result.confidence,
-                    )
-                else:
-                    result.ai_probability = 0.5
-                    result.confidence = 0.0
-
+                tf_scores = predict_faces_batch(self._tf_model, face_crops, get_model_input_shape(self._tf_model))
+                ensemble_scores.extend(tf_scores)
+                logger.debug("TF video model predictions: %d scores", len(tf_scores))
             except Exception as e:
-                logger.error("Model inference failed: %s", e)
-                result.flags.append("inference_error")
-                result.ai_probability = 0.5
-                result.confidence = 0.0
-
-        elif model is None:
-            logger.warning("Video model NOT loaded — heuristics only")
+                logger.debug("TF video inference failed: %s", e)
+        # PyTorch model
+        if self._pt_model is not None:
+            try:
+                pt_scores = predict_faces_batch(self._pt_model, face_crops, get_model_input_shape(self._pt_model))
+                ensemble_scores.extend(pt_scores)
+                logger.debug("PT video model predictions: %d scores", len(pt_scores))
+            except Exception as e:
+                logger.debug("PT video inference failed: %s", e)
+        # Fallback single model
+        if not ensemble_scores and self._single_model is not None:
+            try:
+                fallback_scores = predict_faces_batch(self._single_model, face_crops, get_model_input_shape(self._single_model))
+                ensemble_scores.extend(fallback_scores)
+                logger.debug("Fallback video model predictions: %d scores", len(fallback_scores))
+            except Exception as e:
+                logger.debug("Fallback video inference failed: %s", e)
+        if ensemble_scores:
+            # Weighted aggregation — detected faces weigh more than fallback crops
+            methods = face_info.get("detection_methods", [])
+            weights = []
+            for i, s in enumerate(ensemble_scores):
+                if i < len(methods):
+                    if methods[i] == "detected":
+                        weights.append(1.0)
+                    elif methods[i] == "center_crop":
+                        weights.append(0.5)
+                    else:
+                        weights.append(0.3)
+                else:
+                    weights.append(0.5)
+            w_arr = np.array(weights)
+            s_arr = np.array(ensemble_scores)
+            raw_avg = float(np.average(s_arr, weights=w_arr))
+            result.ai_probability = raw_avg
+            result.frame_scores = ensemble_scores
+            result.model_available = True
+            result.confidence = self._compute_confidence(raw_avg, ensemble_scores)
+            result.metadata["ensemble_mean"] = round(raw_avg, 4)
+            result.metadata["ensemble_max"] = round(float(max(ensemble_scores)), 4)
+            logger.info("Ensemble video model predictions: %d scores, avg=%.3f, confidence=%.3f",
+                        len(ensemble_scores), raw_avg, result.confidence)
+        else:
+            result.ai_probability = 0.5
+            result.confidence = 0.0
             result.flags.append("model_not_loaded")
-            result.ai_probability = 0.5
-            result.confidence = 0.0
-
-        elif not face_crops:
-            result.flags.append("no_face_crops")
-            result.ai_probability = 0.5
-            result.confidence = 0.0
+            logger.warning("No video model loaded — heuristics only")
 
         # ── 4. Heuristic scoring ───────────────────────────────────
         try:
@@ -163,6 +179,19 @@ class VideoAnalyzer:
         except Exception as e:
             logger.warning("Video heuristics failed: %s", e)
             result.rule_score = 0.3
+
+        # ----- Confidence‑based gating -----
+        CONFIDENCE_THRESHOLD = 0.2
+        if result.confidence < CONFIDENCE_THRESHOLD:
+            # Blend AI probability with rule score based on confidence
+            weight_ai = result.confidence / CONFIDENCE_THRESHOLD
+            weight_rule = 1.0 - weight_ai
+            gated_ai = result.ai_probability * weight_ai + result.rule_score * weight_rule
+            logger.debug(
+                "Confidence gating applied: confidence=%.2f, weight_ai=%.2f, weight_rule=%.2f, gated_ai=%.3f",
+                result.confidence, weight_ai, weight_rule, gated_ai,
+            )
+            result.ai_probability = gated_ai
 
         # ── 5. Additional calibration-aware flags ──────────────────
         self._add_calibration_flags(result)

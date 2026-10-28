@@ -1,7 +1,4 @@
-"""
-IoT security routes — device management, alerts, demo seed.
-"""
-
+# IoT routes have been removed
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -17,6 +14,10 @@ from schemas.iot import (
     DeviceRegisterRequest,
     DeviceResponse,
     SeedDemoResponse,
+    TelemetryIngestRequest,
+    TelemetryIngestResponse,
+    TelemetryHistoryResponse,
+    TelemetryRecord,
 )
 from services import iot_service
 
@@ -146,33 +147,72 @@ async def resolve_alert(
 
 @router.post(
     "/telemetry",
-    summary="Ingest IoT telemetry data",
+    response_model=TelemetryIngestResponse,
+    summary="Ingest simulated IoT telemetry and run the rule engine",
 )
-async def ingest_telemetry(
-    payload: dict,  # Temporary, use proper schema
+def ingest_telemetry(
+    payload: TelemetryIngestRequest,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user_required),
 ):
-    """Ingest telemetry and trigger risk scoring"""
-    try:
-        from services.iot_service import process_telemetry
-        
-        device_id = payload.get("device_id")
-        event_type = payload.get("event_type")
-        data = payload.get("data", {})
-        
-        if not device_id or not event_type:
-            raise HTTPException(status_code=400, detail="device_id and event_type required")
-        
-        result = await process_telemetry(
-            db=db,
-            user_id=current_user.id,
-            device_id=device_id,
-            event_type=event_type,
-            data=data
-        )
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    """
+    Accept a validated telemetry event for a registered virtual device,
+    run the existing rule engine, update the device risk score, and
+    return the result.
+
+    This endpoint is used by the frontend Simulation Panel.
+    It is NOT connected to real physical hardware.
+    """
+    # Build the flat dict that process_telemetry() expects,
+    # injecting the authenticated user's id so ownership is always resolved.
+    flat_payload = {
+        "device_id": payload.device_id,
+        "event_type": payload.event_type.value,
+        "data": payload.data,
+        "user_id": str(current_user.id),
+    }
+    if payload.mac_address:
+        flat_payload["mac_address"] = payload.mac_address
+
+    result = iot_service.process_telemetry(db, flat_payload)
+
+    if "error" in result:
+        err = result["error"]
+        if err == "invalid_event_type":
+            raise HTTPException(status_code=400, detail="Invalid event_type.")
+        if err == "owner_not_found":
+            raise HTTPException(status_code=404, detail="Device not found or not owned by you.")
+        raise HTTPException(status_code=500, detail="Telemetry processing failed.")
+
+    return TelemetryIngestResponse(**result)
+
+
+@router.get(
+    "/telemetry",
+    response_model=TelemetryHistoryResponse,
+    summary="Get recent telemetry history for a device",
+)
+def get_telemetry_history(
+    device_id: str = Query(..., description="Device UUID"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_required),
+):
+    """Return paginated telemetry events for the given device, newest first."""
+    total, items = iot_service.get_telemetry_history(
+        db,
+        current_user,
+        device_id=device_id,
+        page=page,
+        limit=limit,
+    )
+    if total == 0 and not items:
+        # Could be a bad device_id or wrong owner — return empty rather than 404
+        pass
+    return TelemetryHistoryResponse(
+        total=total,
+        page=page,
+        limit=limit,
+        items=[TelemetryRecord(**item) for item in items],
+    )

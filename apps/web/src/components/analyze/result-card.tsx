@@ -1,6 +1,6 @@
-'use client';
-
+import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import {
   ShieldCheck,
@@ -9,9 +9,13 @@ import {
   Clock,
   Info,
   OctagonAlert,
+  FileDown,
+  Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion } from 'framer-motion';
+import { api } from '@/lib/api';
+import { toast } from 'sonner';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -190,11 +194,32 @@ interface ResultCardProps {
 }
 
 export function ResultCard({ result }: ResultCardProps) {
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const cfg = riskConfig[result.risk_label];
   const { Icon } = cfg;
   const confCfg = result.confidence_level
     ? confidenceConfig[result.confidence_level]
     : null;
+
+  const handleDownloadPdf = async () => {
+    try {
+      setDownloadingPdf(true);
+      await api.exportAnalysisPdf({
+        analysis_id: result.analysis_id,
+        type: (result as any).type || (result.decoded ? 'QR' : result.audio_metadata ? 'Audio' : result.video_metadata ? 'Video' : 'Analysis'),
+        risk_score: result.risk_score,
+        risk_label: result.risk_label,
+        explanation_summary: result.explanation?.summary,
+        explanation: result.explanation,
+        contributing_factors: result.explanation?.contributing_factors,
+      });
+      toast.success('Forensic incident report downloaded successfully!');
+    } catch (err: any) {
+      toast.error(err.message || 'Failed to generate forensic PDF');
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
 
   return (
     <motion.div
@@ -282,6 +307,28 @@ export function ResultCard({ result }: ResultCardProps) {
                   </p>
                 </div>
               )}
+
+              {/* Forensic Report Action */}
+              <div className="pt-2.5 flex flex-wrap items-center justify-between gap-3 border-t border-zinc-800/80">
+                <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                  <span>Official CERT-In & IT Act 2000 Forensic Document</span>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleDownloadPdf}
+                  disabled={downloadingPdf}
+                  className="h-8 gap-2 border-cyan-500/40 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 hover:text-cyan-200 text-xs font-semibold shadow-sm transition-all"
+                >
+                  {downloadingPdf ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <FileDown className="h-3.5 w-3.5 text-cyan-400" />
+                  )}
+                  {downloadingPdf ? 'Generating PDF...' : 'Download Forensic Report (PDF)'}
+                </Button>
+              </div>
             </div>
           </div>
         </CardContent>

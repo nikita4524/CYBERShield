@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
-import { Loader2, Scan, RotateCcw } from 'lucide-react';
+import { Loader2, Scan, RotateCcw, Upload } from 'lucide-react';
 import { DemoSamplePicker, type DemoSample } from './demo-sample-picker';
 import { toast } from 'sonner';
 import { api } from '@/lib/api';
@@ -47,6 +47,8 @@ interface EmailFormProps {
 /* ------------------------------------------------------------------ */
 export function EmailForm({ onResult, onReset }: EmailFormProps) {
   const [isLoading, setIsLoading] = useState(false);
+  const [isEmlLoading, setIsEmlLoading] = useState(false);
+  const emlInputRef = useRef<HTMLInputElement>(null);
 
   const form = useForm<EmailFormValues>({
     resolver: zodResolver(emailSchema),
@@ -62,6 +64,55 @@ export function EmailForm({ onResult, onReset }: EmailFormProps) {
     form.setValue('sender', d.sender ?? '');
     form.setValue('urls', (d.urls ?? []).join('\n'));
     toast.info(`Demo loaded: "${sample.title}"`);
+  }
+
+  /* EML upload — parses file, populates existing form fields */
+  async function handleEmlUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    // Reset input so the same file can be re-selected if needed
+    e.target.value = '';
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith('.eml')) {
+      toast.error('Only .eml files are supported.');
+      return;
+    }
+    const MAX_SIZE = 5 * 1024 * 1024; // 5 MB
+    if (file.size > MAX_SIZE) {
+      toast.error('File too large. Maximum size is 5 MB.');
+      return;
+    }
+
+    setIsEmlLoading(true);
+    try {
+      const parsed = await api.parseEml(file);
+
+      // Populate existing form fields with extracted data
+      if (parsed.subject)  form.setValue('subject', parsed.subject);
+      if (parsed.sender)   form.setValue('sender',  parsed.sender);
+      if (parsed.body)     form.setValue('body',    parsed.body);
+      if (parsed.urls?.length) {
+        form.setValue('urls', parsed.urls.join('\n'));
+      }
+
+      // Trigger validation so required-field errors clear immediately
+      form.trigger();
+
+      toast.success(`Parsed "${file.name}" — review the fields and click Analyze Email.`);
+    } catch (err: any) {
+      const msg: string = err?.message ?? 'Failed to parse .eml file.';
+      if (msg.toLowerCase().includes('too large')) {
+        toast.error('File too large. Maximum size is 5 MB.');
+      } else if (msg.toLowerCase().includes('corrupted') || msg.toLowerCase().includes('parse')) {
+        toast.error('Could not parse the .eml file. It may be corrupted or unsupported.');
+      } else if (msg.toLowerCase().includes('only .eml')) {
+        toast.error('Only .eml files are supported.');
+      } else {
+        toast.error(msg);
+      }
+    } finally {
+      setIsEmlLoading(false);
+    }
   }
 
   /* Submit */
@@ -105,6 +156,38 @@ export function EmailForm({ onResult, onReset }: EmailFormProps) {
             Email Details
           </h3>
           <div className="flex items-center gap-2">
+            {/* Hidden file input for .eml uploads */}
+            <input
+              ref={emlInputRef}
+              type="file"
+              accept=".eml"
+              className="hidden"
+              onChange={handleEmlUpload}
+              data-testid="eml-file-input"
+            />
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => emlInputRef.current?.click()}
+              disabled={isEmlLoading || isLoading}
+              className="h-7 gap-1.5 text-xs border-zinc-700 bg-zinc-800/60
+                         text-zinc-300 hover:text-cyan-400 hover:border-cyan-600
+                         transition-colors"
+              data-testid="eml-upload-button"
+            >
+              {isEmlLoading ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Parsing…
+                </>
+              ) : (
+                <>
+                  <Upload className="h-3 w-3" />
+                  Upload .EML
+                </>
+              )}
+            </Button>
             <DemoSamplePicker filterType="email" onSelect={handleDemoSelect} />
             <Button
               variant="ghost"

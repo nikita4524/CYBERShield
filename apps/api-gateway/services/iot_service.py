@@ -360,12 +360,25 @@ def _resolve_device(
     return device, owner_id
 
 
-def process_telemetry(db: Session, payload: Dict[str, Any]) -> None:
-    """Ingest one telemetry message (from MQTT or tests)."""
+def process_telemetry(db: Session, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ingest one telemetry message and run the rule engine.
+
+    Accepts a flat dict with keys:
+        device_id   – UUID string of the registered virtual device
+        event_type  – connection | motion | traffic
+        data        – free-form dict payload evaluated by the rule engine
+        mac_address – optional, used for unknown-device detection
+        user_id     – optional owner hint (not needed when device_id is present)
+        timestamp   – optional ISO-8601 string; defaults to utcnow()
+
+    Returns a dict that the HTTP endpoint serialises as TelemetryIngestResponse.
+    Also called directly by the MQTT service (which ignores the return value).
+    """
     event_type = payload.get("event_type")
     if event_type not in ("connection", "motion", "traffic"):
         logger.warning("Ignoring telemetry with invalid event_type: %s", event_type)
-        return
+        return {"error": "invalid_event_type"}
 
     data = payload.get("data") or {}
     if not isinstance(data, dict):
@@ -384,7 +397,7 @@ def process_telemetry(db: Session, payload: Dict[str, Any]) -> None:
 
     if not owner_id:
         logger.warning("Telemetry ignored — could not resolve device owner")
-        return
+        return {"error": "owner_not_found"}
 
     timestamp_raw = payload.get("timestamp")
     event_time = _utcnow()
@@ -403,10 +416,12 @@ def process_telemetry(db: Session, payload: Dict[str, Any]) -> None:
         created_at=event_time,
     )
     db.add(telemetry)
+    telemetry_id = str(telemetry.id)
 
     if device:
         device.last_seen = event_time
         device.status = "online"
+        # Auto-resolve any open device_offline alert since the device is now active
         if _has_open_alert(db, device.id, owner_id, "device_offline"):
             offline_alert = (
                 db.query(IoTAlert)
@@ -427,6 +442,7 @@ def process_telemetry(db: Session, payload: Dict[str, Any]) -> None:
         mac_address=str(mac_address) if mac_address else None,
     )
 
+    alerts_created = 0
     for match in matches:
         if _has_open_alert(db, device.id if device else None, owner_id, match.rule_id):
             continue
@@ -436,8 +452,86 @@ def process_telemetry(db: Session, payload: Dict[str, Any]) -> None:
             device_id=device.id if device else None,
             rule_match=match,
         )
+        alerts_created += 1
 
     if device:
         _recompute_device_risk(db, device)
 
     db.commit()
+
+    risk_score = device.risk_score if device else 0
+    risk_label = device.risk_label if device else "safe"
+
+    return {
+        "telemetry_id": telemetry_id,
+        "device_id": str(device.id) if device else None,
+        "event_type": event_type,
+        "alerts_created": alerts_created,
+        "risk_score": risk_score,
+        "risk_label": risk_label,
+    }
+
+
+def get_telemetry_history(
+    db: Session,
+    user: User,
+    *,
+    device_id: str,
+    page: int = 1,
+    limit: int = 20,
+) -> tuple[int, List[Dict[str, Any]]]:
+    """
+    Return paginated telemetry history for a device, annotated with whether
+    each event triggered at least one alert (for the history panel).
+    """
+    try:
+        dev_uuid = uuid.UUID(device_id)
+    except ValueError:
+        return 0, []
+
+    # Verify the device belongs to this user
+    device = (
+        db.query(IoTDevice)
+        .filter(IoTDevice.id == dev_uuid, IoTDevice.user_id == user.id)
+        .first()
+    )
+    if not device:
+        return 0, []
+
+    query = (
+        db.query(IoTTelemetry)
+        .filter(IoTTelemetry.device_id == dev_uuid)
+        .order_by(IoTTelemetry.created_at.desc())
+    )
+    total = query.count()
+    rows = query.offset((page - 1) * limit).limit(limit).all()
+
+    # Collect the telemetry IDs that have at least one associated alert.
+    # Alerts store device_id but not telemetry_id, so we approximate:
+    # an event "triggered an alert" when the alert was created within
+    # 2 seconds of the telemetry timestamp.
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        # Check whether any alert was created close to this telemetry event
+        from sqlalchemy import func as sa_func
+        alert_near = (
+            db.query(IoTAlert)
+            .filter(
+                IoTAlert.device_id == dev_uuid,
+                IoTAlert.created_at >= row.created_at - timedelta(seconds=2),
+                IoTAlert.created_at <= row.created_at + timedelta(seconds=2),
+            )
+            .first()
+        )
+        items.append(
+            {
+                "id": str(row.id),
+                "device_id": str(row.device_id) if row.device_id else None,
+                "event_type": row.event_type,
+                "data": row.data,
+                "alert_triggered": alert_near is not None,
+                "created_at": row.created_at,
+            }
+        )
+
+    return total, items

@@ -129,7 +129,15 @@ async def analyze_email(
         contextual_flags=phish_result.flags,
     ))
 
-    explanation = explainer.generate("email", score_out, phish_result.features)
+    # Merge highlighted phrases, flagged URLs, and sender flags into features
+    # so ExplainabilityService._email_highlights() can surface them in the response.
+    email_features = {
+        **phish_result.features,
+        "flagged_phrases": phish_result.highlighted_phrases,
+        "flagged_urls": phish_result.flagged_urls,
+        "sender_flags": phish_result.sender_analysis,
+    }
+    explanation = explainer.generate("email", score_out, email_features)
     processing_ms = int((time.time() - start) * 1000)
 
     analysis_id = _persist(
@@ -178,6 +186,174 @@ async def analyze_email(
             "scoring_breakdown": score_out.breakdown,
         },
         "tip": explainer.get_tip("email", score_out.risk_label),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# POST /analyze/email/parse-eml
+# ═══════════════════════════════════════════════════════════════════
+@router.post("/email/parse-eml", response_model=None)
+async def parse_eml_file(
+    file: UploadFile = File(...),
+):
+    """
+    Parse an uploaded .eml file and return extracted fields so the
+    frontend can pre-populate the Manual Email Entry form.
+    The actual threat analysis is NOT performed here — the user
+    reviews the extracted data and submits via POST /analyze/email.
+    """
+    import email as _email
+    import email.policy
+    import re
+    import html
+    from email.header import decode_header as _decode_header
+
+    # ── Validation ──
+    MAX_EML_SIZE = 5 * 1024 * 1024  # 5 MB
+    filename = (file.filename or "").lower()
+    if not filename.endswith(".eml"):
+        raise HTTPException(status_code=400, detail="Only .eml files are supported.")
+
+    content = await file.read()
+    if len(content) > MAX_EML_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 5 MB.")
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    # ── Parse ──
+    try:
+        msg = _email.message_from_bytes(content, policy=email.policy.compat32)
+    except Exception:
+        raise HTTPException(status_code=422, detail="Failed to parse .eml file. The file may be corrupted or in an unsupported format.")
+
+    # ── Header decoder helper ──
+    def _decode(raw: str | None) -> str:
+        if not raw:
+            return ""
+        try:
+            parts = _decode_header(raw)
+            decoded = []
+            for chunk, charset in parts:
+                if isinstance(chunk, bytes):
+                    decoded.append(chunk.decode(charset or "utf-8", errors="replace"))
+                else:
+                    decoded.append(str(chunk))
+            return " ".join(decoded).strip()
+        except Exception:
+            return str(raw).strip()
+
+    # ── Extract headers ──
+    subject = _decode(msg.get("Subject", ""))
+    sender  = _decode(msg.get("From", ""))
+    to      = _decode(msg.get("To", ""))
+    cc      = _decode(msg.get("Cc", ""))
+    reply_to = _decode(msg.get("Reply-To", ""))
+    date    = _decode(msg.get("Date", ""))
+
+    # Normalise sender: strip display name, keep bare address
+    addr_match = re.search(r"[\w.+\-]+@[\w.\-]+", sender)
+    sender_email = addr_match.group(0) if addr_match else sender
+
+    # ── Extract body parts ──
+    plain_body = ""
+    html_body  = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            cd = str(part.get("Content-Disposition", ""))
+            if "attachment" in cd:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                payload = part.get_payload(decode=True)
+                if payload is None:
+                    continue
+                text = payload.decode(charset, errors="replace")
+            except Exception:
+                continue
+            if ct == "text/plain" and not plain_body:
+                plain_body = text
+            elif ct == "text/html" and not html_body:
+                html_body = text
+    else:
+        charset = msg.get_content_charset() or "utf-8"
+        try:
+            raw_payload = msg.get_payload(decode=True)
+            if raw_payload:
+                text = raw_payload.decode(charset, errors="replace")
+                if msg.get_content_type() == "text/html":
+                    html_body = text
+                else:
+                    plain_body = text
+        except Exception:
+            pass
+
+    # Sanitise HTML: strip tags to derive a plain-text fallback,
+    # and escape any remaining markup — never rendered as raw HTML.
+    def _strip_tags(h: str) -> str:
+        clean = re.sub(r"<[^>]+>", " ", h)
+        clean = re.sub(r"\s+", " ", clean).strip()
+        return html.unescape(clean)
+
+    body = plain_body.strip() or _strip_tags(html_body)
+
+    # ── Extract URLs from body ──
+    url_pattern = re.compile(
+        r"https?://[^\s\"'<>()\[\]{}\\]+"
+    )
+    urls_in_body = list(dict.fromkeys(url_pattern.findall(plain_body or _strip_tags(html_body))))
+
+    # ── Extract IP addresses ──
+    ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+    ips = list(dict.fromkeys(ip_pattern.findall(plain_body + html_body)))
+
+    # ── Extract domains from URLs ──
+    domain_pattern = re.compile(r"https?://([^/\s\"'<>]+)")
+    domains = list(dict.fromkeys(domain_pattern.findall(plain_body + html_body)))
+
+    # ── List attachments (metadata only — never executed or returned as data) ──
+    attachments = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            cd = str(part.get("Content-Disposition", ""))
+            if "attachment" in cd:
+                att_name = part.get_filename() or "unnamed"
+                att_type = part.get_content_type() or "unknown"
+                attachments.append({"name": att_name, "content_type": att_type})
+
+    # ── Authentication results (SPF / DKIM / DMARC) ──
+    auth_results_raw = msg.get("Authentication-Results", "")
+    spf = dkim = dmarc = ""
+    if auth_results_raw:
+        for token, key in [("spf", "spf"), ("dkim", "dkim"), ("dmarc", "dmarc")]:
+            m = re.search(rf"{token}=(\S+)", auth_results_raw, re.IGNORECASE)
+            if m:
+                if key == "spf":    spf   = m.group(1)
+                elif key == "dkim": dkim  = m.group(1)
+                elif key == "dmarc": dmarc = m.group(1)
+
+    # ── Raw headers (safe string representation) ──
+    raw_headers = {k: _decode(v) for k, v in msg.items()}
+
+    return {
+        "subject":      subject,
+        "sender":       sender_email,
+        "to":           to,
+        "cc":           cc,
+        "reply_to":     reply_to,
+        "date":         date,
+        "body":         body,
+        "html_body":    _strip_tags(html_body),   # sanitised, no raw HTML
+        "urls":         urls_in_body,
+        "domains":      domains,
+        "ips":          ips,
+        "attachments":  attachments,
+        "headers":      raw_headers,
+        "auth": {
+            "spf":   spf,
+            "dkim":  dkim,
+            "dmarc": dmarc,
+        },
     }
 
 
@@ -451,6 +627,8 @@ async def analyze_image(
             "prevention": prevention.to_dict(),
             "image_metadata": image_result.metadata,
             "per_face_scores": image_result.per_face_scores,
+            "ela_score": round(image_result.ela_score, 4),
+            "forensic_signals": image_result.forensic_signals,
             "explanation": {
                 "summary": score_out.explanation_summary,
                 **explanation,

@@ -332,55 +332,7 @@ export interface OrgMetrics {
   };
 }
 
-/* ── IoT ── */
-export type IoTDeviceType = "camera" | "plug" | "router" | "speaker";
-export type IoTDeviceStatus = "online" | "offline";
-export type IoTRiskLabel = "safe" | "suspicious" | "dangerous";
-export type IoTAlertSeverity = "low" | "medium" | "high";
-
-export interface IoTDevice {
-  id: string;
-  name: string;
-  type: IoTDeviceType;
-  location: string;
-  status: IoTDeviceStatus;
-  mac_address?: string | null;
-  risk_score: number;
-  risk_label: IoTRiskLabel;
-  last_seen?: string | null;
-  open_alerts: number;
-  created_at: string;
-}
-
-export interface IoTDeviceListResponse {
-  total: number;
-  items: IoTDevice[];
-}
-
-export interface IoTAlert {
-  id: string;
-  device_id?: string | null;
-  device_name?: string | null;
-  rule_triggered: string;
-  severity: IoTAlertSeverity;
-  description: string;
-  is_resolved: boolean;
-  created_at: string;
-}
-
-export interface IoTAlertListResponse {
-  total: number;
-  page: number;
-  limit: number;
-  items: IoTAlert[];
-}
-
-export interface RegisterIoTDeviceRequest {
-  name: string;
-  type: IoTDeviceType;
-  location: string;
-  mac_address?: string;
-}
+// IoT module removed – all related types deleted
 
 /* ── Security Incidents ── */
 export type IncidentStatus = "OPEN" | "REVIEWING" | "RESOLVED" | "FALSE_POSITIVE";

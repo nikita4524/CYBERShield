@@ -11,7 +11,7 @@ from typing import Any, Dict, Optional
 
 from config import settings
 from database import SessionLocal
-from services.iot_service import process_telemetry
+
 
 logger = logging.getLogger(__name__)
 

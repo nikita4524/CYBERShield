@@ -15,6 +15,8 @@ import {
   Eye,
   Scan,
   Info,
+  Microscope,
+  Zap,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -63,9 +65,13 @@ interface AnalysisResult {
     max_score?: number;
     per_face_scores?: number[];
     face_locations?: Array<{ x: number; y: number; w: number; h: number }>;
+    forensic_signals?: string[];
+    ela_score?: number;
     [key: string]: unknown;
   };
   per_face_scores: number[];
+  forensic_signals?: string[];
+  ela_score?: number;
   explanation: {
     summary: string;
     contributing_factors: ContributingFactor[];
@@ -466,6 +472,66 @@ export function ImageUpload() {
               </Card>
             </div>
           )}
+
+          {/* ── Forensic Signal Panel ── */}
+          {(() => {
+            const signals: string[] =
+              result.forensic_signals ||
+              result.image_metadata?.forensic_signals ||
+              [];
+            const elaScore =
+              result.ela_score ??
+              (result.image_metadata?.ela_score as number | undefined) ??
+              null;
+            if (signals.length === 0) return null;
+            return (
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400 mb-2 flex items-center gap-1.5">
+                  <Microscope className="h-3.5 w-3.5 text-purple-400" />
+                  Digital Forensic Signals
+                </h3>
+                <Card className="border-purple-500/20 bg-purple-500/5">
+                  <CardContent className="py-3 px-4 space-y-2">
+                    {elaScore !== null && (
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[10px] text-zinc-400 uppercase tracking-wider font-semibold">ELA Score</span>
+                        <span className={`text-xs font-mono font-bold ${
+                          elaScore > 0.5 ? 'text-red-400' : elaScore > 0.25 ? 'text-amber-400' : 'text-emerald-400'
+                        }`}>
+                          {(elaScore * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    )}
+                    <div className="space-y-1.5">
+                      {signals.map((signal, i) => {
+                        const isWarning = signal.toLowerCase().includes('suspicious') ||
+                          signal.toLowerCase().includes('inconsistent') ||
+                          signal.toLowerCase().includes('detected') ||
+                          signal.toLowerCase().includes('low high') ||
+                          signal.toLowerCase().includes('periodic') ||
+                          signal.toLowerCase().includes('splicing');
+                        return (
+                          <div key={i} className={`flex items-start gap-2 rounded-md px-2.5 py-2 text-[11px] ${
+                            isWarning
+                              ? 'bg-red-500/8 border border-red-500/20 text-red-300'
+                              : 'bg-zinc-800/40 border border-zinc-700/40 text-zinc-400'
+                          }`}>
+                            <Zap className={`h-3 w-3 mt-0.5 shrink-0 ${
+                              isWarning ? 'text-red-400' : 'text-zinc-500'
+                            }`} />
+                            <span>{signal}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[10px] text-zinc-600 pt-1">
+                      Forensic analysis: Error Level Analysis (ELA) · Frequency Domain · Noise Pattern · Splice Detection
+                    </p>
+                  </CardContent>
+                </Card>
+              </div>
+            );
+          })()}
 
           {/* Detailed Explanation */}
           <div>

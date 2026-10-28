@@ -16,26 +16,28 @@ from config import settings
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def _truncate_password(password: str) -> str:
+def _truncate_password(password: str) -> bytes:
     """
-    bcrypt silently truncates input beyond 72 bytes, which means two different
-    passwords that share the same first 72 bytes would hash/verify identically.
-    Truncate explicitly so behaviour is predictable and consistent.
+    bcrypt has a 72-byte limit. Truncate passwords explicitly to avoid
+    the warning and ensure consistent behavior.
+    Returns bytes to avoid re-encoding in hash/verify.
     """
     encoded = password.encode("utf-8")
     if len(encoded) > 72:
-        encoded = encoded[:72]
-    return encoded.decode("utf-8", errors="ignore")
+        return encoded[:72]
+    return encoded
 
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password, truncating to 72 bytes first (bcrypt limit)."""
-    return pwd_context.hash(_truncate_password(password))
+    truncated = _truncate_password(password)
+    return pwd_context.hash(truncated)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plaintext password against a hash."""
-    return pwd_context.verify(_truncate_password(plain_password), hashed_password)
+    truncated = _truncate_password(plain_password)
+    return pwd_context.verify(truncated, hashed_password)
 
 
 def generate_otp(length: int = 6) -> str:

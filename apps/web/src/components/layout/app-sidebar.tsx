@@ -279,12 +279,12 @@ function SidebarContent({
             href: "/security",
             icon: ShieldAlert,
           })}
-          {isAuthenticated &&
-            renderNavItem({
-              label: "IoT Security",
-              href: "/dashboard/iot",
-              icon: Cpu,
-            })}
+
+
+
+
+
+
 
           {/* Assistant (flat link) */}
           {renderNavItem({
