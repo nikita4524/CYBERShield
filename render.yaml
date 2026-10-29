@@ -5,8 +5,7 @@ services:
     region: singapore  # closest to India
     plan: free
     buildCommand: |
-      cd apps/api-gateway
-      pip install -r requirements.txt
+      cd apps/api-gateway && pip install -r requirements.txt
     startCommand: |
       cd apps/api-gateway
       bash render_start.sh
