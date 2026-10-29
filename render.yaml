@@ -22,7 +22,7 @@ services:
       - key: MODEL_DIR
         value: ./models
       - key: UPLOAD_DIR
-        value: /tmp/uploads
+        value: /tmp/cybershield_uploads
       - key: PYTHONPATH
         value: /opt/render/project/src/apps/api-gateway
 

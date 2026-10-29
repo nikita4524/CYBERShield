@@ -576,70 +576,7 @@ class ApiClient {
     return this.request<OrgMetrics>(`/admin/metrics?period=${period}`);
   }
 
-  /* ── IoT ── */
-  registerIoTDevice(data: RegisterIoTDeviceRequest) {
-    return this.request<IoTDevice>("/iot/devices/register", {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
-  }
 
-  getIoTDevices() {
-    return this.request<IoTDeviceListResponse>("/iot/devices");
-  }
-
-  deleteIoTDevice(deviceId: string) {
-    return this.request<void>(`/iot/devices/${deviceId}`, {
-      method: "DELETE",
-    });
-  }
-
-  seedIoTDemoDevices() {
-    return this.request<{ message: string; devices: IoTDevice[] }>(
-      "/iot/devices/seed-demo",
-      { method: "POST" }
-    );
-  }
-
-  getIoTAlerts(page = 1, limit = 20, isResolved?: boolean) {
-    const params = new URLSearchParams({
-      page: String(page),
-      limit: String(limit),
-    });
-    if (isResolved !== undefined) {
-      params.set("is_resolved", String(isResolved));
-    }
-    return this.request<IoTAlertListResponse>(`/iot/alerts?${params}`);
-  }
-
-  resolveIoTAlert(alertId: string) {
-    return this.request<IoTAlert>(`/iot/alerts/${alertId}/resolve`, {
-      method: "PATCH",
-    });
-  }
-
-  /**
-   * Send a simulated telemetry event to the backend rule engine.
-   * NOT connected to real hardware — simulation only.
-   */
-  simulateTelemetry(data: TelemetryIngestRequest) {
-    return this.request<TelemetryIngestResponse>("/iot/telemetry", {
-      method: "POST",
-      body: JSON.stringify(data),
-    });
-  }
-
-  /**
-   * Fetch recent telemetry history for a registered virtual device.
-   */
-  getIoTTelemetry(deviceId: string, page = 1, limit = 20) {
-    const params = new URLSearchParams({
-      device_id: deviceId,
-      page: String(page),
-      limit: String(limit),
-    });
-    return this.request<IoTTelemetryHistoryResponse>(`/iot/telemetry?${params}`);
-  }
 
   /* ── Security Incidents ── */
   getIncidents(params: {
