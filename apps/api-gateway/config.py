@@ -36,6 +36,8 @@ class Settings(BaseSettings):
 
     # ── Database ──
     DATABASE_URL: str = "postgresql://cybershield:cybershield_pass@localhost:5432/cybershield_db"
+    # Render hostname injected by the platform (empty in local dev)
+    RENDER_EXTERNAL_HOSTNAME: str = os.getenv("RENDER_EXTERNAL_HOSTNAME", "")
 
     # ── Authentication ──
     JWT_SECRET: str = "change-this-in-production-min-32-chars-long"

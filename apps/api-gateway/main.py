@@ -98,9 +98,14 @@ def create_application() -> FastAPI:
     app.add_middleware(BaseHTTPMiddleware, dispatch=_add_request_metadata)
 
     # 2. Trusted Host
+    # 2. Trusted Host – allow localhost, our domain patterns, and the Render hostname when deployed
+    trusted_hosts = ["localhost", "*.cybershield.ai", "testserver"]
+    # Render injects RENDER_EXTERNAL_HOSTNAME; include it if set (skip empty string)
+    if settings.RENDER_EXTERNAL_HOSTNAME:
+        trusted_hosts.append(settings.RENDER_EXTERNAL_HOSTNAME)
     app.add_middleware(
         TrustedHostMiddleware,
-        allowed_hosts=["*"] if settings.DEBUG else ["localhost", "*.cybershield.ai", "testserver", "cybershield-api-t6z7.onrender.com"]
+        allowed_hosts=trusted_hosts if not settings.DEBUG else ["*"],
     )
 
     # 3. CORS  (outermost — added last so it wraps everything and always runs first)
